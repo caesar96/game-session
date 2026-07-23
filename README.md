@@ -155,10 +155,10 @@ game-session your-game
 ## How it works
 
 ```
-game-session "mangohud game-performance ./mygame"
+game-session ./mygame
   │
   ├─ load_config()          ← ~/.config/game-session/game-session.conf
-  ├─ apply_default_env()    ← export PROTON_*, etc. (no overwrite)
+  ├─ apply_default_env()    ← exports PROTON_*, MANGOHUD*, etc.
   │
   ├─ save_gpu_state()       ← read sysfs → /tmp/game-session-XXXXX/gpu/
   ├─ save_monitor_state()   ← ddcutil getvcp  → /tmp/…/monitor/
@@ -174,12 +174,13 @@ game-session "mangohud game-performance ./mygame"
   │   └─ ddcutil setvcp F9 55  (black stabiliser)
   │   └─ ddcutil setvcp 14 11  (colour preset)
   │
-  ├─ fork + exec game-performance mangohud game-performance ./mygame
-  ├─ wait (blocks until the game exits)
+  ├─ fork + exec game-performance ./mygame
+  ├─ waitpid (blocks until the game exits)
   │
   ├─ restore_monitor()       ← ddcutil setvcp with saved values
   ├─ restore_gpu()           ← sudo game-session-helper with saved values
   └─ rm -rf /tmp/game-session-XXXXX
+```
 ```
 
 If the game is killed with `Ctrl+C` / `SIGTERM`, the signal handler forwards
