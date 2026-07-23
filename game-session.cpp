@@ -76,10 +76,42 @@ static std::string env_or(const char *key, const std::string &def) {
     return v ? std::string(v) : def;
 }
 
-static void load_config() {
+static std::string config_path() {
     const char *home = std::getenv("HOME");
-    if (!home) return;
-    std::string path = std::string(home) + "/.config/game-session/game-session.conf";
+    if (!home) return {};
+    return std::string(home) + "/.config/game-session/game-session.conf";
+}
+
+static void ensure_config() {
+    std::string path = config_path();
+    if (path.empty()) return;
+    struct stat st;
+    if (stat(path.c_str(), &st) == 0) return; // already exists
+
+    std::string dir = path.substr(0, path.rfind('/'));
+    mkdir(dir.c_str(), 0755);
+
+    std::ofstream f(path);
+    if (!f.is_open()) return;
+    f << "# game-session configuration\n"
+         "# Created automatically. These are the default values;\n"
+         "# override any of them in Steam Launch Options if needed.\n"
+         "#\n"
+         "# MONITOR_PRESET  picture preset: FPS, RTS, Gamer 1, Gamer 2, Vivid, Reader, HDR Effect\n"
+         "# GS_GPU_FORCE_LEVEL  auto | low | high | manual\n"
+         "# GS_GPU_PROFILE      0=BOOTUP, 1=3D_FULL_SCREEN, 2=POWER_SAVING, …\n"
+         "# GS_GPU_POWER_CAP    power limit in microwatts (120000000 = 120 W)\n"
+         "\n"
+         "MONITOR_PRESET=RTS\n"
+         "GS_GPU_FORCE_LEVEL=high\n"
+         "GS_GPU_PROFILE=1\n"
+         "GS_GPU_POWER_CAP=120000000\n";
+}
+
+static void load_config() {
+    ensure_config();
+    std::string path = config_path();
+    if (path.empty()) return;
     std::ifstream f(path);
     if (!f.is_open()) return;
     std::string line;
@@ -89,7 +121,6 @@ static void load_config() {
         if (eq == std::string::npos) continue;
         std::string key = line.substr(0, eq);
         std::string val = line.substr(eq + 1);
-        // strip quotes
         if (val.size() >= 2 && val.front() == '"' && val.back() == '"')
             val = val.substr(1, val.size() - 2);
         setenv(key.c_str(), val.c_str(), 0);
@@ -153,9 +184,17 @@ static void monitor_write_vcp(const std::string &bus, const std::string &vcp,
 // ── GPU via helper (sudo) ──────────────────────────────────────────────────
 
 static std::string helper_path() {
+    const char *env = std::getenv("GS_HELPER");
+    if (env) return env;
+    struct stat st;
+    if (stat("/usr/local/bin/game-session-helper", &st) == 0)
+        return "/usr/local/bin/game-session-helper";
     const char *home = std::getenv("HOME");
-    return std::string(home ? home : "/home/devd")
-         + "/.local/bin/game-session-helper";
+    if (home) {
+        std::string local = std::string(home) + "/.local/bin/game-session-helper";
+        if (stat(local.c_str(), &st) == 0) return local;
+    }
+    return "game-session-helper";
 }
 
 static void gpu_write(const std::string &action, const std::string &val) {
