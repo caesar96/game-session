@@ -10,7 +10,7 @@ add_executable(game-session-helper game-session-helper.cpp)
 install(TARGETS game-session game-session-helper
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
-set(BINDIR "${CMAKE_INSTALL_PREFIX}/bin")
+set(BINDIR "${CMAKE_INSTALL_FULL_BINDIR}")
 set(USERNAME "$ENV{USER}")
 configure_file(
     sudo/game-session.sudoers.in

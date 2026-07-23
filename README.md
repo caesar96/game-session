@@ -40,25 +40,28 @@ game-session %command%
 
 ## Install
 
-### 1. Build & install (CMake — recommended)
+### 1. Build & install
 
 ```bash
 git clone https://github.com/caesar96/game-session.git
 cd game-session
-cmake -B build -DCMAKE_INSTALL_PREFIX=~/.local
+cmake -B build
 cmake --build build
-cmake --install build
+sudo cmake --install build
+sudo cmake --install build --component system
 ```
 
-(`~/.local/bin/` should be in your `PATH`.)
+Binaries go to `/usr/local/bin/` and are owned by root, so no one can tamper with
+the privileged helper. The sudoers line is generated using your `$USER` and the
+helper path.
 
 ### Manual (without CMake)
 
 ```bash
 g++ -O2 -std=c++17 -o game-session-helper game-session-helper.cpp
 g++ -O2 -std=c++17 -o game-session game-session.cpp
-cp game-session game-session-helper ~/.local/bin/
-sudo tee /etc/sudoers.d/game-session <<< "$USER ALL=(ALL) NOPASSWD: $HOME/.local/bin/game-session-helper"
+sudo cp game-session game-session-helper /usr/local/bin/
+sudo tee /etc/sudoers.d/game-session <<< "$USER ALL=(ALL) NOPASSWD: /usr/local/bin/game-session-helper"
 ```
 
 ```bash
