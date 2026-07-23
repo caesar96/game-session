@@ -20,3 +20,10 @@ configure_file(
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/sudo/game-session.sudoers"
         DESTINATION /etc/sudoers.d
         COMPONENT system)
+
+if(CMAKE_INSTALL_PREFIX STREQUAL "/usr/local")
+    configure_file(cmake/uninstall.cmake.in uninstall.cmake @ONLY)
+    add_custom_target(uninstall
+        COMMAND "${CMAKE_COMMAND}" -P "${CMAKE_CURRENT_BINARY_DIR}/uninstall.cmake"
+        COMMENT "Removing game-session files…")
+endif()

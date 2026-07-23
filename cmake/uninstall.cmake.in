@@ -1,0 +1,22 @@
+if(NOT EXISTS "@CMAKE_BINARY_DIR@/install_manifest.txt")
+    message(FATAL_ERROR "Cannot find install manifest: @CMAKE_BINARY_DIR@/install_manifest.txt")
+endif()
+
+file(READ "@CMAKE_BINARY_DIR@/install_manifest.txt" files)
+string(REGEX REPLACE "\n" ";" files "${files}")
+foreach(file ${files})
+    if(EXISTS "${file}")
+        file(REMOVE "${file}")
+        message(STATUS "Removed: ${file}")
+    endif()
+endforeach()
+
+# also remove empty parent dirs if possible
+foreach(file ${files})
+    get_filename_component(dir "${file}" DIRECTORY)
+    file(REMOVE_RECURSE "${dir}" 2>/dev/null)
+endforeach()
+
+# remove sudoers
+execute_process(COMMAND rm -f /etc/sudoers.d/game-session)
+message(STATUS "Removed: /etc/sudoers.d/game-session")
