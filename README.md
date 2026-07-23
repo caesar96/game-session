@@ -40,26 +40,47 @@ game-session %command%
 
 ## Install
 
-### 1. Build
+### 1. Build & install (CMake — recommended)
 
 ```bash
 git clone https://github.com/caesar96/game-session.git
 cd game-session
+cmake -B build -DCMAKE_INSTALL_PREFIX=~/.local
+cmake --build build
+cmake --install build
+```
+
+(`~/.local/bin/` should be in your `PATH`.)
+
+### Manual (without CMake)
+
+```bash
 g++ -O2 -std=c++17 -o game-session-helper game-session-helper.cpp
 g++ -O2 -std=c++17 -o game-session game-session.cpp
 cp game-session game-session-helper ~/.local/bin/
+sudo tee /etc/sudoers.d/game-session <<< "$USER ALL=(ALL) NOPASSWD: $HOME/.local/bin/game-session-helper"
+```
+
+```bash
+git clone https://github.com/caesar96/game-session.git
+cd game-session
+cmake -B build -DCMAKE_INSTALL_PREFIX=~/.local
+cmake --build build
+cmake --install build
 ```
 
 (`~/.local/bin/` should be in your `PATH`.)
 
 ### 2. Sudoers (required for GPU sysfs writes)
 
-The helper binary needs root to write GPU power‑management files. Create
-`/etc/sudoers.d/game-session`:
+The helper binary needs root to write GPU power‑management files:
 
 ```bash
-sudo tee /etc/sudoers.d/game-session <<< "$USER ALL=(ALL) NOPASSWD: $HOME/.local/bin/game-session-helper"
+sudo cmake --install build --component system
 ```
+
+This installs the configured sudoers file to `/etc/sudoers.d/game-session`.
+It uses the `$USER` detected during the `cmake -B build` step.
 
 ### 3. Verify
 
