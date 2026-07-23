@@ -116,6 +116,21 @@ GS_GPU_PROFILE=1
 GS_GPU_POWER_CAP=120000000
 ```
 
+### Config file
+
+You can also persist your preferences in `~/.config/game-session/game-session.conf`:
+
+```bash
+# ~/.config/game-session/game-session.conf
+MONITOR_PRESET=RTS
+GS_GPU_FORCE_LEVEL=high
+GS_GPU_PROFILE=1
+GS_GPU_POWER_CAP=120000000
+```
+
+These are loaded as environment variables before the game starts, and they
+**do not override** anything already set in your shell or Steam launch options.
+
 ### Default Steam environment variables
 
 The binary automatically exports the following defaults **without overriding**
@@ -180,7 +195,6 @@ game-session ./mygame
   ├─ restore_monitor()       ← ddcutil setvcp with saved values
   ├─ restore_gpu()           ← sudo game-session-helper with saved values
   └─ rm -rf /tmp/game-session-XXXXX
-```
 ```
 
 If the game is killed with `Ctrl+C` / `SIGTERM`, the signal handler forwards
