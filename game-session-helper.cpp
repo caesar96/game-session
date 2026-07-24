@@ -56,7 +56,9 @@ int main(int argc, char *argv[]) {
                   << "  od-mclk-max    <freq>\n"
                   << "  od-voltage     <offset>\n"
                   << "  od-commit\n"
-                  << "  od-reset\n";
+                  << "  od-reset\n"
+                  << "  fan-enable     <1|2>\n"
+                  << "  fan-pwm        <0-255>\n";
         return 1;
     }
 
@@ -111,6 +113,18 @@ int main(int argc, char *argv[]) {
 
     if (action == "od-reset") {
         return write_sysfs(od, "r\n") ? 0 : 1;
+    }
+
+    if (action == "fan-enable") {
+        if (value != "1" && value != "2") { std::cerr << "invalid fan-enable (1=manual, 2=auto)\n"; return 1; }
+        if (HWMON.empty()) { std::cerr << "hwmon not found\n"; return 1; }
+        return write_sysfs(HWMON + "/pwm1_enable", value + "\n") ? 0 : 1;
+    }
+
+    if (action == "fan-pwm") {
+        if (!is_number(value)) { std::cerr << "invalid pwm\n"; return 1; }
+        if (HWMON.empty()) { std::cerr << "hwmon not found\n"; return 1; }
+        return write_sysfs(HWMON + "/pwm1", value + "\n") ? 0 : 1;
     }
 
     std::cerr << "unknown action: " << action << "\n";

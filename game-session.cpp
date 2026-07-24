@@ -372,9 +372,6 @@ static void restore_gpu() {
         }
     }
 
-    v = read_file_trim(d + "/pwm1_enable");
-    if (!v.empty() && !hwmon_path.empty())
-        write_file(hwmon_path + "/pwm1_enable", v + "\n");
 }
 
 // ── monitor ─────────────────────────────────────────────────────────────────
@@ -445,6 +442,7 @@ static Preset get_preset(const std::string &name) {
 }
 
 static void save_monitor_state(const std::string &dir) {
+    if (!std::getenv("MONITOR_PRESET")) return;
     auto bus = monitor_find_bus();
     if (bus.empty()) { std::cerr << "game-session: monitor not found, skipping\n"; return; }
     auto d = dir + "/monitor";
@@ -457,9 +455,10 @@ static void save_monitor_state(const std::string &dir) {
 }
 
 static void apply_monitor() {
+    if (!std::getenv("MONITOR_PRESET")) return;
     auto bus = read_file_trim(state_dir + "/monitor/bus");
     if (bus.empty()) return;
-    auto pname = env_or("MONITOR_PRESET", "RTS");
+    auto pname = std::getenv("MONITOR_PRESET");
     auto p = get_preset(pname);
     monitor_write_vcp(bus, "15", p.dec);
     monitor_write_vcp(bus, "F7", p.rt);
@@ -501,8 +500,8 @@ static int interpolate_pwm(int temp, const std::vector<FanPoint> &curve, int fan
 static void fan_loop(std::atomic<bool> &running, const Config &cfg) {
     if (hwmon_path.empty() || !cfg.fan_enabled) return;
 
-    // enable manual fan mode
-    write_file(hwmon_path + "/pwm1_enable", "1\n");
+    // enable manual fan mode via helper (needs root)
+    helper_write("fan-enable", "1");
 
     std::vector<FanPoint> curve;
     for (auto &p : cfg.fan_curve) curve.push_back({p.first, p.second});
@@ -527,15 +526,15 @@ static void fan_loop(std::atomic<bool> &running, const Config &cfg) {
         }
 
         if (pwm != last_pwm && pwm > 0) {
-            write_file(hwmon_path + "/pwm1", std::to_string(pwm) + "\n");
+            helper_write("fan-pwm", std::to_string(pwm));
             last_pwm = pwm;
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(cfg.fan_interval_ms));
     }
 
-    // restore auto fan mode
-    write_file(hwmon_path + "/pwm1_enable", "2\n");
+    // restore auto fan mode via helper
+    helper_write("fan-enable", "2");
 }
 
 // ── restore / cleanup ──────────────────────────────────────────────────────
@@ -543,8 +542,8 @@ static void fan_loop(std::atomic<bool> &running, const Config &cfg) {
 static void restore_fan() {
     auto d = state_dir + "/gpu";
     auto v = read_file_trim(d + "/pwm1_enable");
-    if (!v.empty() && !hwmon_path.empty())
-        write_file(hwmon_path + "/pwm1_enable", v + "\n");
+    if (!v.empty())
+        helper_write("fan-enable", v);
 }
 
 static void cleanup() {
