@@ -8,10 +8,7 @@ cmake -B build
 echo "==> Building…"
 cmake --build build
 
-echo "==> Installing binaries…"
+echo "==> Installing binaries + sudoers…"
 sudo cmake --install build
-
-echo "==> Installing sudoers…"
-sudo cmake --install build --component system
 
 echo "==> Done! Run 'game-session echo ok' to verify."

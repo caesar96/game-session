@@ -11,7 +11,10 @@ install(TARGETS game-session game-session-helper
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 set(BINDIR "${CMAKE_INSTALL_FULL_BINDIR}")
-set(USERNAME "$ENV{USER}")
+set(USERNAME "$ENV{SUDO_USER}")
+if(USERNAME STREQUAL "")
+    set(USERNAME "$ENV{USER}")
+endif()
 configure_file(
     sudo/game-session.sudoers.in
     sudo/game-session.sudoers
@@ -21,9 +24,7 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/sudo/game-session.sudoers"
         DESTINATION /etc/sudoers.d
         COMPONENT system)
 
-if(CMAKE_INSTALL_PREFIX STREQUAL "/usr/local")
-    configure_file(cmake/uninstall.cmake.in uninstall.cmake @ONLY)
-    add_custom_target(uninstall
-        COMMAND "${CMAKE_COMMAND}" -P "${CMAKE_CURRENT_BINARY_DIR}/uninstall.cmake"
-        COMMENT "Removing game-session files…")
-endif()
+configure_file(cmake/uninstall.cmake.in uninstall.cmake @ONLY)
+add_custom_target(uninstall
+    COMMAND "${CMAKE_COMMAND}" -P "${CMAKE_CURRENT_BINARY_DIR}/uninstall.cmake"
+    COMMENT "Removing game-session files…")
