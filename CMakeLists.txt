@@ -23,11 +23,11 @@ if(USERNAME STREQUAL "")
     set(USERNAME "$ENV{USER}")
 endif()
 configure_file(
-    sudo/game-session.sudoers.in
-    sudo/game-session.sudoers
+    sudo/game-session.in
+    sudo/game-session
     @ONLY
 )
-install(FILES "${CMAKE_CURRENT_BINARY_DIR}/sudo/game-session.sudoers"
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/sudo/game-session"
         DESTINATION /etc/sudoers.d
         COMPONENT system
         PERMISSIONS OWNER_READ GROUP_READ)

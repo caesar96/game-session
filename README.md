@@ -182,7 +182,7 @@ game-session/
 ├── cmake/
 │   └── uninstall.cmake.in
 ├── sudo/
-│   └── game-session.sudoers.in
+│   └── game-session.in
 └── README.md
 ```
 
