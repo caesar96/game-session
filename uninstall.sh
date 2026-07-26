@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+cd "$(dirname "$0")"
 
 echo "==> Removing binaries…"
 sudo rm -fv /usr/local/bin/game-session /usr/local/bin/game-session-helper
