@@ -50,14 +50,15 @@ cd game-session
 ./install.sh
 ```
 
-Binaries go to `/usr/local/bin/` (owned by root), sudoers to
-`/etc/sudoers.d/game-session` (permissions `0440`).
+Builds a pacman package and installs it via `sudo pacman -U`. Binaries go to
+`/usr/bin/`, sudoers to `/etc/sudoers.d/game-session` (permissions `0440`,
+grants NOPASSWD to the `wheel` group).
 
 ### Uninstall
 
 ```bash
 cd game-session
-./uninstall.sh        # or: ./uninstall.sh /usr/local
+./uninstall.sh
 ```
 
 ### Verify
@@ -255,6 +256,7 @@ game-session/
 ├── game-session-helper.cpp     ← privileged helper
 ├── amdgpu_overdrive.cpp/hpp    ← AMDGPU OD class
 ├── install.sh / uninstall.sh
+├── PKGBUILD                    ← Arch Linux package
 ├── CMakeLists.txt
 ├── cmake/uninstall.cmake.in
 ├── sudo/game-session.in        ← sudoers template

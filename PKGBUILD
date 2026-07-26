@@ -6,21 +6,27 @@ pkgdesc="AMD GPU overclock, fan curve, monitor HDR/presets and CPU optimizations
 arch=('x86_64')
 url="https://github.com/caesar96/game-session"
 license=('MIT')
-depends=('glibc' 'gcc-libs')
+depends=('glibc' 'gcc-libs' 'kscreen-doctor')
 makedepends=('cmake' 'gcc')
 optdepends=(
     'game-performance: CPU governor and sleep inhibit (CachyOS)'
     'ddcutil: DDC/CI monitor preset switching'
 )
-source=("${pkgname}::git+https://github.com/caesar96/game-session.git")
-sha256sums=('SKIP')
+provides=('game-session')
+conflicts=('game-session')
+source=()
+sha256sums=()
+
+prepare() {
+    mkdir -p "${srcdir}/${pkgname}"
+    cp -r "${PWD}"/* "${srcdir}/${pkgname}/"
+}
 
 build() {
     cd "${srcdir}/${pkgname}"
     cmake -B build \
         -DCMAKE_INSTALL_PREFIX=/usr \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_CXX_FLAGS="-DNDEBUG"
+        -DCMAKE_BUILD_TYPE=Release
     cmake --build build
 }
 
