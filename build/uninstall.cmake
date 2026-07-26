@@ -1,0 +1,27 @@
+if(NOT EXISTS "/home/devd/DEV/linux/build/install_manifest.txt")
+    message(FATAL_ERROR "Cannot find install manifest: /home/devd/DEV/linux/build/install_manifest.txt")
+endif()
+
+file(READ "/home/devd/DEV/linux/build/install_manifest.txt" files)
+string(REGEX REPLACE "\n" ";" files "${files}")
+foreach(file ${files})
+    if(EXISTS "${file}")
+        file(REMOVE "${file}")
+        message(STATUS "Removed: ${file}")
+    endif()
+endforeach()
+
+# remove sudoers (requires root; try with sudo if plain rm fails)
+execute_process(COMMAND rm -f /etc/sudoers.d/game-session
+                RESULT_VARIABLE _rm_result)
+if(_rm_result AND UNIX)
+    execute_process(COMMAND sudo rm -f /etc/sudoers.d/game-session
+                    RESULT_VARIABLE _sudo_result)
+    if(_sudo_result)
+        message(WARNING "Could not remove /etc/sudoers.d/game-session (run uninstall with sudo)")
+    else()
+        message(STATUS "Removed: /etc/sudoers.d/game-session")
+    endif()
+else()
+    message(STATUS "Removed: /etc/sudoers.d/game-session")
+endif()

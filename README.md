@@ -90,6 +90,8 @@ game-session dump     # diagnostic — no side effects
 | `GS_FAN_CURVE` | — | Fan curve: comma‑separated `temp:pwm` pairs |
 | `MONITOR_PRESET` | — | Monitor picture preset: `FPS`, `RTS`, `Gamer 1`, `Gamer 2`, `Vivid`, `Reader`, `HDR Effect` |
 | `MONITOR_MATCH` | `GSM` | String to match in `ddcutil detect --brief` output |
+| `GS_HDR` | `true` | Enable HDR via kscreen-doctor (`true` / `1` = enable, `0` = skip) |
+| `GS_HDR_OUTPUT` | `DP-1` | Display output name for HDR (e.g. `DP-1`, `HDMI-A-1`) |
 | `GS_HELPER` | auto‑detected | Override path to `game-session-helper` binary |
 
 ### Config file
@@ -108,6 +110,8 @@ voltage_offset = -5
 
 [monitor]
 preset = RTS
+hdr = true
+hdr_output = DP-1
 
 [fan]
 enabled = true
@@ -195,6 +199,7 @@ game-session ./mygame
   │   └─ force-level          ← sudo helper force-level high    ← LAST
   │
   ├─ apply_monitor()          ← ddcutil setvcp
+  ├─ apply_hdr()              ← kscreen-doctor output.DP-1.hdr.enable
   ├─ start fan thread
   │
   ├─ fork + exec game-performance ./mygame
@@ -202,6 +207,7 @@ game-session ./mygame
   │
   ├─ stop fan thread
   ├─ restore_monitor()
+  ├─ restore_hdr()            ← kscreen-doctor output.DP-1.hdr.disable
   ├─ restore_gpu()            ← force-level, profile, power-cap, od-reset
   └─ rm -rf /tmp/game-session-XXXXX
 ```

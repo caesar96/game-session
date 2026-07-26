@@ -155,6 +155,8 @@ struct Config {
     std::string memory_clock;
     std::string voltage_offset;
     std::string monitor_preset;
+    bool hdr = false;
+    std::string hdr_output = "DP-1";
     bool fan_enabled = false;
     int fan_start = 50;
     int fan_interval_ms = 250;
@@ -190,6 +192,8 @@ static void parse_env_config(Config &cfg) {
         }
     }
     if (auto v = env_or("GS_MONITOR_PRESET", ""); !v.empty()) cfg.monitor_preset = v;
+    if (auto v = env_or("GS_HDR", ""); !v.empty()) cfg.hdr = (v == "true" || v == "1");
+    if (auto v = env_or("GS_HDR_OUTPUT", ""); !v.empty()) cfg.hdr_output = v;
 }
 
 static void parse_config_file(Config &cfg, const std::string &path) {
@@ -225,6 +229,8 @@ static void parse_config_file(Config &cfg, const std::string &path) {
         else if (skey == "fan.hysteresis" || key == "GS_FAN_HYSTERESIS") cfg.fan_hysteresis = safe_stoi(val, 2);
         else if (skey == "fan.emergency_temp" || key == "GS_FAN_EMERGENCY_TEMP") cfg.fan_emergency_temp = safe_stoi(val, 85);
         else if (skey == "monitor.preset" || key == "MONITOR_PRESET") cfg.monitor_preset = val;
+        else if (skey == "monitor.hdr" || key == "GS_HDR") cfg.hdr = (val == "true" || val == "1");
+        else if (skey == "monitor.hdr_output" || key == "GS_HDR_OUTPUT") cfg.hdr_output = val;
         else if (skey == "fan.curve" || key == "GS_FAN_CURVE") {
             cfg.fan_curve.clear();
             std::istringstream vs(val);
@@ -278,6 +284,8 @@ static void ensure_config() {
          "# [monitor]\n"
          "# preset          = monitor picture mode: FPS, RTS, Gamer 1, Gamer 2, Vivid, Reader, HDR Effect\n"
          "#                   (requires ddcutil and a compatible monitor)\n"
+         "# hdr             = true | false — enable HDR via kscreen-doctor\n"
+         "# hdr_output      = DP-1 (or HDMI-A-1, etc.) — output name for HDR\n"
          "\n"
          "[gpu]\n"
          "force_level = high\n"
@@ -507,6 +515,74 @@ static bool monitor_enabled() {
     return false;
 }
 
+// ── HDR (kscreen-doctor) ──────────────────────────────────────────────────
+
+static std::string strip_ansi(const std::string &s) {
+    std::string out;
+    for (size_t i = 0; i < s.size(); i++) {
+        if (s[i] == '\x1b' && i + 1 < s.size() && s[i + 1] == '[') {
+            i += 2;
+            while (i < s.size() && s[i] != 'm') i++;
+        } else {
+            out += s[i];
+        }
+    }
+    return out;
+}
+
+static std::string hdr_current_state(const std::string &output) {
+    auto raw = exec_capture_argv("kscreen-doctor", {"-o"});
+    auto out = strip_ansi(raw);
+    // locate the output section and read HDR line
+    auto pos = out.find("Output: ");
+    while (pos != std::string::npos) {
+        auto nl = out.find('\n', pos);
+        if (nl == std::string::npos) break;
+        auto line = out.substr(pos, nl - pos);
+        if (line.find(output) != std::string::npos) {
+            auto section_end = out.find("Output: ", nl + 1);
+            auto sec = (section_end == std::string::npos)
+                ? out.substr(nl + 1)
+                : out.substr(nl + 1, section_end - nl - 1);
+            auto hpos = sec.find("\n\tHDR: ");
+            if (hpos != std::string::npos) {
+                auto val_start = hpos + 7;
+                auto val_end = sec.find('\n', val_start);
+                return trim(sec.substr(val_start, val_end - val_start));
+            }
+        }
+        pos = out.find("Output: ", nl + 1);
+    }
+    return {};
+}
+
+static void save_hdr_state(const std::string &dir) {
+    if (!g_config.hdr) return;
+    auto d = dir + "/monitor";
+    mkdir(d.c_str(), 0755);
+    auto state = hdr_current_state(g_config.hdr_output);
+    if (!state.empty())
+        write_file(d + "/hdr_state", state);
+}
+
+static void apply_hdr() {
+    if (!g_config.hdr) return;
+    exec_argv("kscreen-doctor",
+              {"output." + g_config.hdr_output + ".hdr.enable"});
+}
+
+static void restore_hdr() {
+    auto d = state_dir + "/monitor";
+    auto state = read_file_trim(d + "/hdr_state");
+    if (state.empty()) return;
+    if (state == "disabled")
+        exec_argv("kscreen-doctor",
+                  {"output." + g_config.hdr_output + ".hdr.disable"});
+    // if it was enabled, leave it enabled
+}
+
+// ── monitor DDC/CI ────────────────────────────────────────────────────────
+
 static void save_monitor_state(const std::string &dir) {
     if (!monitor_enabled()) return;
     auto bus = monitor_find_bus();
@@ -611,6 +687,7 @@ static void restore_fan() {
 
 static void cleanup() {
     restore_monitor();
+    restore_hdr();
     restore_gpu();
     restore_fan();
     if (!state_dir.empty()) {
@@ -710,6 +787,8 @@ static void cmd_dump() {
     std::cout << "  memory_clock     = " << (g_config.memory_clock.empty() ? "(not set)" : g_config.memory_clock) << "\n";
     std::cout << "  voltage_offset   = " << (g_config.voltage_offset.empty() ? "(not set)" : g_config.voltage_offset) << "\n";
     std::cout << "  monitor_preset   = " << (g_config.monitor_preset.empty() ? "(not set)" : g_config.monitor_preset) << "\n";
+    std::cout << "  hdr              = " << (g_config.hdr ? "true" : "false") << "\n";
+    std::cout << "  hdr_output       = " << g_config.hdr_output << "\n";
     std::cout << "  fan_enabled      = " << (g_config.fan_enabled ? "true" : "false") << "\n";
     std::cout << "  fan_curve        = ";
     for (auto &p : g_config.fan_curve)
@@ -750,8 +829,10 @@ int main(int argc, char *argv[]) {
 
     save_gpu_state(state_dir);
     save_monitor_state(state_dir);
+    save_hdr_state(state_dir);
     apply_gpu();
     apply_monitor();
+    apply_hdr();
 
     std::vector<const char *> cmd_vec = {"game-performance"};
     for (int i = 1; i < argc; i++) cmd_vec.push_back(argv[i]);

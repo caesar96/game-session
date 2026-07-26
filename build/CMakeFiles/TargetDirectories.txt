@@ -1,0 +1,9 @@
+/home/devd/DEV/linux/build/CMakeFiles/game-session.dir
+/home/devd/DEV/linux/build/CMakeFiles/game-session-helper.dir
+/home/devd/DEV/linux/build/CMakeFiles/uninstall.dir
+/home/devd/DEV/linux/build/CMakeFiles/edit_cache.dir
+/home/devd/DEV/linux/build/CMakeFiles/rebuild_cache.dir
+/home/devd/DEV/linux/build/CMakeFiles/list_install_components.dir
+/home/devd/DEV/linux/build/CMakeFiles/install.dir
+/home/devd/DEV/linux/build/CMakeFiles/install/local.dir
+/home/devd/DEV/linux/build/CMakeFiles/install/strip.dir
