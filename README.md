@@ -40,58 +40,26 @@ game-session %command%
 
 ## Install
 
-### 1. Build & install
-
 ```bash
 git clone https://github.com/caesar96/game-session.git
 cd game-session
-cmake -B build
-cmake --build build
-sudo cmake --install build
-sudo cmake --install build --component system
+./install.sh
 ```
 
-Binaries go to `/usr/local/bin/` and are owned by root, so no one can tamper with
-the privileged helper. The sudoers line is generated using your `$USER` and the
-helper path.
+Binaries go to `/usr/local/bin/` (owned by root), sudoers to `/etc/sudoers.d/`.
 
-### Manual (without CMake)
+### Uninstall
 
 ```bash
-g++ -O2 -std=c++17 -o game-session-helper game-session-helper.cpp
-g++ -O2 -std=c++17 -o game-session game-session.cpp
-sudo cp game-session game-session-helper /usr/local/bin/
-sudo tee /etc/sudoers.d/game-session <<< "$USER ALL=(ALL) NOPASSWD: /usr/local/bin/game-session-helper"
-```
-
-```bash
-git clone https://github.com/caesar96/game-session.git
 cd game-session
-cmake -B build -DCMAKE_INSTALL_PREFIX=~/.local
-cmake --build build
-cmake --install build
+./uninstall.sh
 ```
 
-(`~/.local/bin/` should be in your `PATH`.)
-
-### 2. Sudoers (required for GPU sysfs writes)
-
-The helper binary needs root to write GPU power‑management files:
-
-```bash
-sudo cmake --install build --component system
-```
-
-This installs the configured sudoers file to `/etc/sudoers.d/game-session`.
-It uses the `$USER` detected during the `cmake -B build` step.
-
-### 3. Verify
+### Verify
 
 ```bash
 game-session echo "it works"
 ```
-
-You should see the output without any sudo prompts.
 
 ## Configuration
 
@@ -107,29 +75,29 @@ You should see the output without any sudo prompts.
 
 ### Config file
 
-You can also write settings to `~/.config/game-session/game-session.conf`:
+Persist your settings in `~/.config/game-session/game-session.conf` (auto‑created on first run):
 
-```bash
-MONITOR_PRESET=FPS
-GS_GPU_FORCE_LEVEL=high
-GS_GPU_PROFILE=1
-GS_GPU_POWER_CAP=120000000
-```
-
-### Config file
-
-You can also persist your preferences in `~/.config/game-session/game-session.conf`:
-
-```bash
+```ini
 # ~/.config/game-session/game-session.conf
-MONITOR_PRESET=RTS
-GS_GPU_FORCE_LEVEL=high
-GS_GPU_PROFILE=1
-GS_GPU_POWER_CAP=120000000
+[gpu]
+force_level = high
+profile = 1
+power_cap = 120000000
+min_clock = 2650
+max_clock = 2750
+memory_clock = 950
+voltage_offset = -5
+
+[monitor]
+preset = RTS
+
+[fan]
+enabled = true
+curve = 40:60,50:100,60:170,65:220,70:255
 ```
 
-These are loaded as environment variables before the game starts, and they
-**do not override** anything already set in your shell or Steam launch options.
+Environment variables override config file values and Steam launch options
+override both.
 
 ### Default Steam environment variables
 
@@ -205,16 +173,22 @@ exiting.
 
 ```
 game-session/
-├── game-session.cpp          ← orchestrator (user‑facing binary)
-├── game-session-helper.cpp   ← privileged helper (called via sudo)
-├── .gitignore
+├── game-session.cpp            ← orchestrator (user‑facing binary)
+├── game-session-helper.cpp     ← privileged helper (called via sudo)
+├── amdgpu_overdrive.cpp/hpp    ← AMDGPU OD class (auto‑detect, sysfs, reset)
+├── install.sh                  ← build + install in one step
+├── uninstall.sh                ← remove binaries + sudoers
+├── CMakeLists.txt
+├── cmake/
+│   └── uninstall.cmake.in
+├── sudo/
+│   └── game-session.sudoers.in
 └── README.md
 ```
 
 The helper is intentionally tiny and compiled separately so nobody can read or
-modify the code that runs as root. It accepts exactly three commands —
-`force-level`, `profile`, `power-cap` — and validates every argument against a
-hardcoded whitelist. No shell execution, no file traversal, no injection vectors.
+modify the code that runs as root. It validates every argument — no shell
+execution, no file traversal, no injection vectors.
 
 ## License
 
