@@ -1,1 +1,0 @@
-devd ALL=(ALL) NOPASSWD: /usr/local/bin/game-session-helper

@@ -1,1 +1,0 @@
-/usr/bin/c++ -Wl,--dependency-file=CMakeFiles/game-session.dir/link.d "CMakeFiles/game-session.dir/game-session.cpp.o" "CMakeFiles/game-session.dir/amdgpu_overdrive.cpp.o" -o game-session

@@ -1,3 +1,0 @@
-/usr/local/bin/game-session
-/usr/local/bin/game-session-helper
-/etc/sudoers.d/game-session
