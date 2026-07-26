@@ -181,6 +181,13 @@ AmdgpuOverdrive::Limits AmdgpuOverdrive::read_limits() const {
         }
     }
 
+    // RDNA2 does not report VDDGFX offset limits in OD_RANGE;
+    // assume the standard kernel range (±255 mV) if unset.
+    if (interface() == Interface::rdna2 && l.vddgfx_offset_min == 0 && l.vddgfx_offset_max == 0) {
+        l.vddgfx_offset_min = -255;
+        l.vddgfx_offset_max = 255;
+    }
+
     cached_limits_ = l;
     return l;
 }
