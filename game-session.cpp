@@ -310,11 +310,11 @@ static bool save_gpu_state(const std::string &dir) {
 
 static void apply_gpu() {
     auto base = sysfs_base();
-    helper_write("force-level", g_config.force_level);
     helper_write("profile", g_config.profile);
     if (!hwmon_path.empty())
         helper_write("power-cap", g_config.power_cap);
 
+    // Apply OverDrive changes first while still in auto
     auto od_iface = detect_od_interface();
     if (od_iface == "rdna2" || od_iface == "rdna1" || od_iface == "legacy") {
         if (!g_config.min_clock.empty())
@@ -330,6 +330,9 @@ static void apply_gpu() {
             helper_write("od-commit", "");
         }
     }
+
+    // Lock frequencies last to avoid flickering from OD transitions
+    helper_write("force-level", g_config.force_level);
 }
 
 static void restore_gpu() {
