@@ -9,6 +9,7 @@
 #include <sys/stat.h>
 
 static std::unique_ptr<AmdgpuOverdrive> g_od;
+static std::string DEVICE_PATH;
 static std::string HWMON;
 
 // ── sysfs I/O ────────────────────────────────────────────────────────────────
@@ -21,6 +22,13 @@ static bool write_sysfs(const std::string &path, const std::string &val) {
     }
     f << val;
     return f.good();
+}
+
+static int safe_stoi(const std::string &v) {
+    char *end = nullptr;
+    long val = std::strtol(v.c_str(), &end, 10);
+    if (*end != '\0') return 0;
+    return static_cast<int>(val);
 }
 
 static bool is_number(const std::string &v) {
@@ -58,7 +66,10 @@ int main(int argc, char *argv[]) {
     }
 
     g_od = AmdgpuOverdrive::create();
-    if (g_od && !g_od->hwmon_path().empty()) HWMON = g_od->hwmon_path().string();
+    if (g_od) {
+        DEVICE_PATH = g_od->device_path().string();
+        if (!g_od->hwmon_path().empty()) HWMON = g_od->hwmon_path().string();
+    }
 
     std::string action = argv[1];
     std::string value  = (argc > 2) ? argv[2] : "";
@@ -70,12 +81,14 @@ int main(int argc, char *argv[]) {
             std::cerr << "invalid force-level: " << value << "\n";
             return 1;
         }
-        return write_sysfs(g_od->device_path().string() + "/power_dpm_force_performance_level", value + "\n") ? 0 : 1;
+        if (DEVICE_PATH.empty()) { std::cerr << "GPU not found\n"; return 1; }
+        return write_sysfs(DEVICE_PATH + "/power_dpm_force_performance_level", value + "\n") ? 0 : 1;
     }
 
     if (action == "profile") {
         if (!is_number(value)) { std::cerr << "invalid profile\n"; return 1; }
-        return write_sysfs(g_od->device_path().string() + "/pp_power_profile_mode", value + "\n") ? 0 : 1;
+        if (DEVICE_PATH.empty()) { std::cerr << "GPU not found\n"; return 1; }
+        return write_sysfs(DEVICE_PATH + "/pp_power_profile_mode", value + "\n") ? 0 : 1;
     }
 
     if (action == "power-cap") {
@@ -93,7 +106,7 @@ int main(int argc, char *argv[]) {
 
     if (action == "od-sclk-min") {
         if (!is_number(value)) { std::cerr << "invalid sclk min\n"; return 1; }
-        int v = std::stoi(value);
+        int v = safe_stoi(value);
         if (!g_od->sclk_min_valid(v)) {
             auto l = g_od->read_limits();
             std::cerr << "sclk min out of range [" << l.sclk_min << ", " << l.sclk_max << "]\n";
@@ -104,7 +117,7 @@ int main(int argc, char *argv[]) {
 
     if (action == "od-sclk-max") {
         if (!is_number(value)) { std::cerr << "invalid sclk max\n"; return 1; }
-        int v = std::stoi(value);
+        int v = safe_stoi(value);
         if (!g_od->sclk_max_valid(v)) {
             auto l = g_od->read_limits();
             std::cerr << "sclk max out of range [" << l.sclk_min << ", " << l.sclk_max << "]\n";
@@ -115,7 +128,7 @@ int main(int argc, char *argv[]) {
 
     if (action == "od-mclk-min") {
         if (!is_number(value)) { std::cerr << "invalid mclk min\n"; return 1; }
-        int v = std::stoi(value);
+        int v = safe_stoi(value);
         if (!g_od->mclk_min_valid(v)) {
             auto l = g_od->read_limits();
             std::cerr << "mclk min out of range [" << l.mclk_min << ", " << l.mclk_max << "]\n";
@@ -126,7 +139,7 @@ int main(int argc, char *argv[]) {
 
     if (action == "od-mclk-max") {
         if (!is_number(value)) { std::cerr << "invalid mclk max\n"; return 1; }
-        int v = std::stoi(value);
+        int v = safe_stoi(value);
         if (!g_od->mclk_max_valid(v)) {
             auto l = g_od->read_limits();
             std::cerr << "mclk max out of range [" << l.mclk_min << ", " << l.mclk_max << "]\n";
@@ -137,7 +150,7 @@ int main(int argc, char *argv[]) {
 
     if (action == "od-voltage") {
         if (!is_signed_number(value)) { std::cerr << "invalid voltage offset\n"; return 1; }
-        int v = std::stoi(value);
+        int v = safe_stoi(value);
         if (!g_od->voltage_offset_valid(v)) {
             auto l = g_od->read_limits();
             std::cerr << "voltage offset out of range [" << l.vddgfx_offset_min << ", " << l.vddgfx_offset_max << "]\n";
@@ -166,6 +179,8 @@ int main(int argc, char *argv[]) {
 
     if (action == "fan-pwm") {
         if (!is_number(value)) { std::cerr << "invalid pwm\n"; return 1; }
+        int pwm = safe_stoi(value);
+        if (pwm < 0 || pwm > 255) { std::cerr << "pwm out of range (0-255)\n"; return 1; }
         if (HWMON.empty()) { std::cerr << "hwmon not found\n"; return 1; }
         return write_sysfs(HWMON + "/pwm1", value + "\n") ? 0 : 1;
     }

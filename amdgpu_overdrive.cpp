@@ -33,7 +33,11 @@ static int parse_mhz(const std::string &s) {
         if (c >= '0' && c <= '9') val += c;
         else if (c == '-') val += c;
     }
-    return val.empty() ? 0 : std::stoi(val);
+    if (val.empty()) return 0;
+    char *end = nullptr;
+    long v = std::strtol(val.c_str(), &end, 10);
+    if (*end != '\0') return 0;
+    return static_cast<int>(v);
 }
 
 // ── construct / detect ───────────────────────────────────────────────────────
@@ -148,8 +152,6 @@ AmdgpuOverdrive::State AmdgpuOverdrive::read_state() const {
 }
 
 AmdgpuOverdrive::Limits AmdgpuOverdrive::read_limits() const {
-    if (cached_limits_) return *cached_limits_;
-
     Limits l;
     auto content = read_od();
     std::istringstream ss(content);
@@ -188,7 +190,6 @@ AmdgpuOverdrive::Limits AmdgpuOverdrive::read_limits() const {
         l.vddgfx_offset_max = 255;
     }
 
-    cached_limits_ = l;
     return l;
 }
 

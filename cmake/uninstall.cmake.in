@@ -11,6 +11,17 @@ foreach(file ${files})
     endif()
 endforeach()
 
-# remove sudoers
-execute_process(COMMAND rm -f /etc/sudoers.d/game-session)
-message(STATUS "Removed: /etc/sudoers.d/game-session")
+# remove sudoers (requires root; try with sudo if plain rm fails)
+execute_process(COMMAND rm -f /etc/sudoers.d/game-session
+                RESULT_VARIABLE _rm_result)
+if(_rm_result AND UNIX)
+    execute_process(COMMAND sudo rm -f /etc/sudoers.d/game-session
+                    RESULT_VARIABLE _sudo_result)
+    if(_sudo_result)
+        message(WARNING "Could not remove /etc/sudoers.d/game-session (run uninstall with sudo)")
+    else()
+        message(STATUS "Removed: /etc/sudoers.d/game-session")
+    endif()
+else()
+    message(STATUS "Removed: /etc/sudoers.d/game-session")
+endif()

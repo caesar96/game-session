@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$(readlink -f "$0")")"
 
-echo "==> Removing binaries…"
-sudo rm -fv /usr/local/bin/game-session /usr/local/bin/game-session-helper
+PREFIX="${1:-/usr/local}"
+
+echo "==> Removing binaries from ${PREFIX}/bin…"
+sudo rm -fv "${PREFIX}/bin/game-session" "${PREFIX}/bin/game-session-helper"
 
 echo "==> Removing sudoers…"
 sudo rm -fv /etc/sudoers.d/game-session

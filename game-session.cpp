@@ -2,16 +2,17 @@
 
 #include <algorithm>
 #include <atomic>
-#include <array>
 #include <cerrno>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <csignal>
+#include <fcntl.h>
 #include <fstream>
 #include <iostream>
 #include <memory>
 #include <sstream>
-#include <signal.h>
 #include <string>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -22,7 +23,8 @@
 // ── globals ─────────────────────────────────────────────────────────────────
 
 static std::string state_dir;
-static pid_t child_pid = 0;
+static volatile sig_atomic_t g_child_pid = 0;
+static volatile sig_atomic_t g_shutdown = 0;
 static std::string hwmon_path;
 
 // ── util ────────────────────────────────────────────────────────────────────
@@ -50,18 +52,72 @@ static bool write_file(const std::string &path, const std::string &val) {
     return f.good();
 }
 
-static std::string exec_capture(const std::string &cmd) {
-    std::array<char, 4096> buf{};
+static std::string exec_capture_argv(const std::string &cmd,
+                                      const std::vector<std::string> &args) {
+    int pipefd[2];
+    if (pipe(pipefd) < 0) return {};
+
+    pid_t pid = fork();
+    if (pid < 0) { close(pipefd[0]); close(pipefd[1]); return {}; }
+
+    if (pid == 0) {
+        close(pipefd[0]);
+        dup2(pipefd[1], STDOUT_FILENO);
+        close(pipefd[1]);
+
+        int fdnull = open("/dev/null", O_WRONLY);
+        if (fdnull >= 0) dup2(fdnull, STDERR_FILENO);
+
+        std::vector<const char *> argv;
+        argv.reserve(args.size() + 2);
+        argv.push_back(cmd.c_str());
+        for (const auto &a : args) argv.push_back(a.c_str());
+        argv.push_back(nullptr);
+
+        execvp(cmd.c_str(), const_cast<char *const *>(argv.data()));
+        _exit(127);
+    }
+
+    close(pipefd[1]);
     std::string result;
-    FILE *pipe = popen(cmd.c_str(), "r");
-    if (!pipe) return {};
-    while (fgets(buf.data(), buf.size(), pipe)) result += buf.data();
-    pclose(pipe);
+    char buf[4096];
+    ssize_t n;
+    while ((n = read(pipefd[0], buf, sizeof(buf))) > 0)
+        result.append(buf, n);
+    close(pipefd[0]);
+
+    int status;
+    waitpid(pid, &status, 0);
     return result;
 }
 
-static bool exec_cmd(const std::string &cmd) {
-    return std::system(cmd.c_str()) == 0;
+static bool exec_argv(const std::string &cmd,
+                      const std::vector<std::string> &args) {
+    pid_t pid = fork();
+    if (pid < 0) return false;
+
+    if (pid == 0) {
+        std::vector<const char *> argv;
+        argv.reserve(args.size() + 2);
+        argv.push_back(cmd.c_str());
+        for (const auto &a : args) argv.push_back(a.c_str());
+        argv.push_back(nullptr);
+
+        execvp(cmd.c_str(), const_cast<char *const *>(argv.data()));
+        _exit(127);
+    }
+
+    int status;
+    waitpid(pid, &status, 0);
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+static int safe_stoi(const std::string &s, int default_val = 0) {
+    if (s.empty()) return default_val;
+    char *end = nullptr;
+    long val = std::strtol(s.c_str(), &end, 10);
+    if (*end != '\0') return default_val;
+    return static_cast<int>(val);
 }
 
 static std::string trim(const std::string &s) {
@@ -118,10 +174,10 @@ static void parse_env_config(Config &cfg) {
     if (auto v = env_or("GS_GPU_MEMORY_CLOCK", ""); !v.empty()) cfg.memory_clock = v;
     if (auto v = env_or("GS_GPU_VOLTAGE_OFFSET", ""); !v.empty()) cfg.voltage_offset = v;
     if (auto v = env_or("GS_FAN_ENABLED", ""); !v.empty()) cfg.fan_enabled = (v == "true" || v == "1");
-    if (auto v = env_or("GS_FAN_START", ""); !v.empty()) cfg.fan_start = std::stoi(v);
-    if (auto v = env_or("GS_FAN_INTERVAL_MS", ""); !v.empty()) cfg.fan_interval_ms = std::stoi(v);
-    if (auto v = env_or("GS_FAN_HYSTERESIS", ""); !v.empty()) cfg.fan_hysteresis = std::stoi(v);
-    if (auto v = env_or("GS_FAN_EMERGENCY_TEMP", ""); !v.empty()) cfg.fan_emergency_temp = std::stoi(v);
+    if (auto v = env_or("GS_FAN_START", ""); !v.empty()) cfg.fan_start = safe_stoi(v, 50);
+    if (auto v = env_or("GS_FAN_INTERVAL_MS", ""); !v.empty()) cfg.fan_interval_ms = safe_stoi(v, 250);
+    if (auto v = env_or("GS_FAN_HYSTERESIS", ""); !v.empty()) cfg.fan_hysteresis = safe_stoi(v, 2);
+    if (auto v = env_or("GS_FAN_EMERGENCY_TEMP", ""); !v.empty()) cfg.fan_emergency_temp = safe_stoi(v, 85);
     if (auto v = env_or("GS_FAN_CURVE", ""); !v.empty()) {
         cfg.fan_curve.clear();
         std::istringstream ss(v);
@@ -129,8 +185,8 @@ static void parse_env_config(Config &cfg) {
         while (std::getline(ss, token, ',')) {
             auto col = token.find(':');
             if (col != std::string::npos)
-                cfg.fan_curve.push_back({std::stoi(token.substr(0, col)),
-                                          std::stoi(token.substr(col + 1))});
+                cfg.fan_curve.push_back({safe_stoi(token.substr(0, col)),
+                                          safe_stoi(token.substr(col + 1))});
         }
     }
     if (auto v = env_or("GS_MONITOR_PRESET", ""); !v.empty()) cfg.monitor_preset = v;
@@ -164,10 +220,10 @@ static void parse_config_file(Config &cfg, const std::string &path) {
         else if (skey == "gpu.memory_clock" || key == "GS_GPU_MEMORY_CLOCK") cfg.memory_clock = val;
         else if (skey == "gpu.voltage_offset" || key == "GS_GPU_VOLTAGE_OFFSET") cfg.voltage_offset = val;
         else if (skey == "fan.enabled" || key == "GS_FAN_ENABLED") cfg.fan_enabled = (val == "true" || val == "1");
-        else if (skey == "fan.fan_start" || skey == "fan.start" || key == "GS_FAN_START") cfg.fan_start = std::stoi(val);
-        else if (skey == "fan.interval_ms" || key == "GS_FAN_INTERVAL_MS") cfg.fan_interval_ms = std::stoi(val);
-        else if (skey == "fan.hysteresis" || key == "GS_FAN_HYSTERESIS") cfg.fan_hysteresis = std::stoi(val);
-        else if (skey == "fan.emergency_temp" || key == "GS_FAN_EMERGENCY_TEMP") cfg.fan_emergency_temp = std::stoi(val);
+        else if (skey == "fan.fan_start" || skey == "fan.start" || key == "GS_FAN_START") cfg.fan_start = safe_stoi(val, 50);
+        else if (skey == "fan.interval_ms" || key == "GS_FAN_INTERVAL_MS") cfg.fan_interval_ms = safe_stoi(val, 250);
+        else if (skey == "fan.hysteresis" || key == "GS_FAN_HYSTERESIS") cfg.fan_hysteresis = safe_stoi(val, 2);
+        else if (skey == "fan.emergency_temp" || key == "GS_FAN_EMERGENCY_TEMP") cfg.fan_emergency_temp = safe_stoi(val, 85);
         else if (skey == "monitor.preset" || key == "MONITOR_PRESET") cfg.monitor_preset = val;
         else if (skey == "fan.curve" || key == "GS_FAN_CURVE") {
             cfg.fan_curve.clear();
@@ -176,8 +232,8 @@ static void parse_config_file(Config &cfg, const std::string &path) {
             while (std::getline(vs, tok, ',')) {
                 auto col = tok.find(':');
                 if (col != std::string::npos)
-                    cfg.fan_curve.push_back({std::stoi(tok.substr(0, col)),
-                                              std::stoi(tok.substr(col + 1))});
+                    cfg.fan_curve.push_back({safe_stoi(tok.substr(0, col)),
+                                              safe_stoi(tok.substr(col + 1))});
             }
         }
     }
@@ -195,7 +251,8 @@ static void ensure_config() {
     struct stat st;
     if (stat(path.c_str(), &st) == 0) return;
     auto dir = path.substr(0, path.rfind('/'));
-    mkdir(dir.c_str(), 0755);
+    std::error_code ec;
+    fs::create_directories(dir, ec);
     std::ofstream f(path);
     if (!f.is_open()) return;
     f << "# game-session configuration\n"
@@ -215,7 +272,7 @@ static void ensure_config() {
          "# start           = temperature to start fan curve at\n"
          "# interval_ms     = PWM update interval\n"
          "# hysteresis      = temp change needed before recalculating PWM\n"
-         "# emergency_temp  = above this -> 100 %% fan\n"
+          "# emergency_temp  = above this -> 100 %% fan\n"
           "# curve           = temp:pwm,...  (e.g. 40:50,50:58,60:70,65:90,70:100)\n"
          "#\n"
          "# [monitor]\n"
@@ -263,16 +320,24 @@ static std::string helper_path() {
 }
 
 static void helper_write(const std::string &action, const std::string &val) {
-    auto cmd = "sudo " + helper_path() + " " + action + " " + val;
-    exec_cmd(cmd);
+    auto hp = helper_path();
+    std::vector<const char *> args = {"sudo", hp.c_str(), action.c_str()};
+    if (!val.empty()) args.push_back(val.c_str());
+    args.push_back(nullptr);
+
+    pid_t pid = fork();
+    if (pid < 0) return;
+
+    if (pid == 0) {
+        execvp("sudo", const_cast<char *const *>(args.data()));
+        _exit(127);
+    }
+
+    int status;
+    waitpid(pid, &status, 0);
 }
 
 // ── GPU state (non-OD settings only) ────────────────────────────────────────
-
-static bool file_exists(const std::string &p) {
-    struct stat st;
-    return stat(p.c_str(), &st) == 0;
-}
 
 static std::string detect_od_interface() {
     auto od = AmdgpuOverdrive::create();
@@ -287,7 +352,9 @@ static std::string detect_od_interface() {
 
 static bool save_gpu_state(const std::string &dir) {
     auto d = dir + "/gpu";
-    if (mkdir(d.c_str(), 0755) != 0 && errno != EEXIST) return false;
+    if (mkdir(d.c_str(), 0755) != 0) {
+        if (errno != EEXIST) return false;
+    }
     auto base = sysfs_base();
     write_file(d + "/force_level", read_file_trim(base + "/power_dpm_force_performance_level"));
     auto pm = read_file(base + "/pp_power_profile_mode");
@@ -369,7 +436,7 @@ static void restore_gpu() {
 
 static std::string monitor_find_bus() {
     auto match = env_or("MONITOR_MATCH", "GSM");
-    auto out = exec_capture("ddcutil detect --brief 2>/dev/null");
+    auto out = exec_capture_argv("ddcutil", {"detect", "--brief"});
     std::istringstream ss(out);
     std::string line, bus;
     while (std::getline(ss, line)) {
@@ -386,8 +453,8 @@ static std::string monitor_find_bus() {
 }
 
 static std::string monitor_read_vcp(const std::string &bus, const std::string &vcp) {
-    auto cmd = "ddcutil --permit-unknown-feature --bus " + bus + " getvcp " + vcp + " 2>/dev/null";
-    auto out = exec_capture(cmd);
+    auto out = exec_capture_argv("ddcutil",
+        {"--permit-unknown-feature", "--bus", bus, "getvcp", vcp});
     auto sl = out.find("sl=");
     if (sl != std::string::npos) {
         auto val = out.substr(sl + 3);
@@ -411,9 +478,8 @@ static std::string monitor_read_vcp(const std::string &bus, const std::string &v
 
 static void monitor_write_vcp(const std::string &bus, const std::string &vcp,
                                const std::string &val) {
-    auto cmd = "ddcutil --permit-unknown-feature --bus " + bus
-             + " setvcp " + vcp + " " + val + " 2>/dev/null";
-    exec_cmd(cmd);
+    exec_argv("ddcutil",
+        {"--permit-unknown-feature", "--bus", bus, "setvcp", vcp, val});
 }
 
 struct Preset {
@@ -511,7 +577,7 @@ static void fan_loop(std::atomic<bool> &running, const Config &cfg) {
         auto temp_str = read_file_trim(hwmon_path + "/temp1_input");
         int temp = 0;
         if (temp_str.empty()) { std::this_thread::sleep_for(std::chrono::milliseconds(cfg.fan_interval_ms)); continue; }
-        temp = std::stoi(temp_str) / 1000;
+        temp = safe_stoi(temp_str) / 1000;
 
         int pwm = 0;
         if (temp >= cfg.fan_emergency_temp) {
@@ -547,20 +613,18 @@ static void cleanup() {
     restore_monitor();
     restore_gpu();
     restore_fan();
-    if (!state_dir.empty())
-        exec_cmd("rm -rf " + state_dir);
+    if (!state_dir.empty()) {
+        std::error_code ec;
+        fs::remove_all(state_dir, ec);
+    }
 }
 
 // ── signal ──────────────────────────────────────────────────────────────────
 
 static void handle_signal(int sig) {
-    if (child_pid > 0) {
-        kill(child_pid, sig);
-        int status;
-        waitpid(child_pid, &status, 0);
-    }
-    cleanup();
-    _exit(128 + sig);
+    g_shutdown = 1;
+    pid_t pid = g_child_pid;
+    if (pid > 0) kill(pid, sig);
 }
 
 // ── defaults ────────────────────────────────────────────────────────────────
@@ -605,8 +669,10 @@ static void cmd_dump() {
     }
 
     if (!hwmon_path.empty()) {
-        std::cout << "  power_cap:  " << read_file_trim(hwmon_path + "/power1_cap") << " uW ("
-                  << std::stod(read_file_trim(hwmon_path + "/power1_cap")) / 1000000 << " W)\n";
+        auto cap_str = read_file_trim(hwmon_path + "/power1_cap");
+        double cap_w = 0;
+        try { cap_w = std::stod(cap_str) / 1000000; } catch (...) {}
+        std::cout << "  power_cap:  " << cap_str << " uW (" << cap_w << " W)\n";
         std::cout << "  temp:       " << read_file_trim(hwmon_path + "/temp1_input") << " millideg\n";
     }
 
@@ -675,16 +741,12 @@ int main(int argc, char *argv[]) {
     }
 
     char buf[64];
-    std::strcpy(buf, "/tmp/game-session-XXXXXX");
+    std::snprintf(buf, sizeof(buf), "/tmp/game-session-XXXXXX");
     if (!mkdtemp(buf)) {
         std::cerr << "failed to create temp dir\n";
         return 1;
     }
     state_dir = buf;
-
-    signal(SIGINT,  handle_signal);
-    signal(SIGTERM, handle_signal);
-    signal(SIGQUIT, handle_signal);
 
     save_gpu_state(state_dir);
     save_monitor_state(state_dir);
@@ -695,18 +757,23 @@ int main(int argc, char *argv[]) {
     for (int i = 1; i < argc; i++) cmd_vec.push_back(argv[i]);
     cmd_vec.push_back(nullptr);
 
-    child_pid = fork();
-    if (child_pid < 0) {
+    g_child_pid = fork();
+    if (g_child_pid < 0) {
         std::cerr << "fork failed\n";
         cleanup();
         return 1;
     }
 
-    if (child_pid == 0) {
+    if (g_child_pid == 0) {
         execvp("game-performance", const_cast<char *const *>(cmd_vec.data()));
         std::cerr << "failed to execute game-performance: " << strerror(errno) << "\n";
         _exit(127);
     }
+
+    // Install signal handlers only after fork so g_child_pid is always valid
+    signal(SIGINT,  handle_signal);
+    signal(SIGTERM, handle_signal);
+    signal(SIGQUIT, handle_signal);
 
     std::atomic<bool> fan_running{true};
     std::thread fan_thread;
@@ -715,8 +782,8 @@ int main(int argc, char *argv[]) {
     }
 
     int status;
-    waitpid(child_pid, &status, 0);
-    child_pid = 0;
+    while (waitpid(g_child_pid, &status, 0) < 0 && errno == EINTR) {}
+    g_child_pid = 0;
 
     fan_running = false;
     if (fan_thread.joinable()) fan_thread.join();

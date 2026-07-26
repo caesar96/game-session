@@ -4,8 +4,15 @@ project(game-session LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+add_compile_options(-Wall -Wextra)
+
+include(GNUInstallDirs)
+
 add_executable(game-session game-session.cpp amdgpu_overdrive.cpp)
 add_executable(game-session-helper game-session-helper.cpp amdgpu_overdrive.cpp)
+
+find_package(Threads REQUIRED)
+target_link_libraries(game-session PRIVATE Threads::Threads)
 
 install(TARGETS game-session game-session-helper
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

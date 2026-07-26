@@ -1,7 +1,6 @@
 #pragma once
 
 #include <filesystem>
-#include <optional>
 #include <string>
 #include <memory>
 
@@ -64,5 +63,4 @@ private:
     fs::path device_path_;
     fs::path od_path_;
     fs::path hwmon_path_;
-    mutable std::optional<Limits> cached_limits_;
 };
