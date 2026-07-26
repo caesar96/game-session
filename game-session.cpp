@@ -98,6 +98,7 @@ struct Config {
     std::string max_clock;
     std::string memory_clock;
     std::string voltage_offset;
+    std::string monitor_preset;
     bool fan_enabled = false;
     int fan_start = 50;
     int fan_interval_ms = 250;
@@ -132,6 +133,7 @@ static void parse_env_config(Config &cfg) {
                                           std::stoi(token.substr(col + 1))});
         }
     }
+    if (auto v = env_or("GS_MONITOR_PRESET", ""); !v.empty()) cfg.monitor_preset = v;
 }
 
 static void parse_config_file(Config &cfg, const std::string &path) {
@@ -166,6 +168,7 @@ static void parse_config_file(Config &cfg, const std::string &path) {
         else if (skey == "fan.interval_ms" || key == "GS_FAN_INTERVAL_MS") cfg.fan_interval_ms = std::stoi(val);
         else if (skey == "fan.hysteresis" || key == "GS_FAN_HYSTERESIS") cfg.fan_hysteresis = std::stoi(val);
         else if (skey == "fan.emergency_temp" || key == "GS_FAN_EMERGENCY_TEMP") cfg.fan_emergency_temp = std::stoi(val);
+        else if (skey == "monitor.preset" || key == "MONITOR_PRESET") cfg.monitor_preset = val;
         else if (skey == "fan.curve" || key == "GS_FAN_CURVE") {
             cfg.fan_curve.clear();
             std::istringstream vs(val);
@@ -213,7 +216,11 @@ static void ensure_config() {
          "# interval_ms     = PWM update interval\n"
          "# hysteresis      = temp change needed before recalculating PWM\n"
          "# emergency_temp  = above this -> 100 %% fan\n"
-         "# curve           = temp:pwm,...  (e.g. 40:50,50:58,60:70,65:90,70:100)\n"
+          "# curve           = temp:pwm,...  (e.g. 40:50,50:58,60:70,65:90,70:100)\n"
+         "#\n"
+         "# [monitor]\n"
+         "# preset          = monitor picture mode: FPS, RTS, Gamer 1, Gamer 2, Vivid, Reader, HDR Effect\n"
+         "#                   (requires ddcutil and a compatible monitor)\n"
          "\n"
          "[gpu]\n"
          "force_level = high\n"
@@ -425,8 +432,17 @@ static Preset get_preset(const std::string &name) {
     return {"31", "2", "55", "11"};
 }
 
+static bool monitor_enabled() {
+    if (!g_config.monitor_preset.empty()) return true;
+    if (auto e = std::getenv("MONITOR_PRESET")) {
+        g_config.monitor_preset = e;
+        return true;
+    }
+    return false;
+}
+
 static void save_monitor_state(const std::string &dir) {
-    if (!std::getenv("MONITOR_PRESET")) return;
+    if (!monitor_enabled()) return;
     auto bus = monitor_find_bus();
     if (bus.empty()) { std::cerr << "game-session: monitor not found, skipping\n"; return; }
     auto d = dir + "/monitor";
@@ -439,11 +455,10 @@ static void save_monitor_state(const std::string &dir) {
 }
 
 static void apply_monitor() {
-    if (!std::getenv("MONITOR_PRESET")) return;
+    if (g_config.monitor_preset.empty()) return;
     auto bus = read_file_trim(state_dir + "/monitor/bus");
     if (bus.empty()) return;
-    auto pname = std::getenv("MONITOR_PRESET");
-    auto p = get_preset(pname);
+    auto p = get_preset(g_config.monitor_preset);
     monitor_write_vcp(bus, "15", p.dec);
     monitor_write_vcp(bus, "F7", p.rt);
     monitor_write_vcp(bus, "F9", p.bs);
@@ -628,6 +643,7 @@ static void cmd_dump() {
     std::cout << "  max_clock        = " << (g_config.max_clock.empty() ? "(not set)" : g_config.max_clock) << "\n";
     std::cout << "  memory_clock     = " << (g_config.memory_clock.empty() ? "(not set)" : g_config.memory_clock) << "\n";
     std::cout << "  voltage_offset   = " << (g_config.voltage_offset.empty() ? "(not set)" : g_config.voltage_offset) << "\n";
+    std::cout << "  monitor_preset   = " << (g_config.monitor_preset.empty() ? "(not set)" : g_config.monitor_preset) << "\n";
     std::cout << "  fan_enabled      = " << (g_config.fan_enabled ? "true" : "false") << "\n";
     std::cout << "  fan_curve        = ";
     for (auto &p : g_config.fan_curve)
