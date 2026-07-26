@@ -11,12 +11,6 @@ foreach(file ${files})
     endif()
 endforeach()
 
-# also remove empty parent dirs if possible
-foreach(file ${files})
-    get_filename_component(dir "${file}" DIRECTORY)
-    file(REMOVE_RECURSE "${dir}" 2>/dev/null)
-endforeach()
-
 # remove sudoers
 execute_process(COMMAND rm -f /etc/sudoers.d/game-session)
 message(STATUS "Removed: /etc/sudoers.d/game-session")

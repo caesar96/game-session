@@ -22,7 +22,8 @@ configure_file(
 )
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/sudo/game-session.sudoers"
         DESTINATION /etc/sudoers.d
-        COMPONENT system)
+        COMPONENT system
+        PERMISSIONS OWNER_READ GROUP_READ)
 
 configure_file(cmake/uninstall.cmake.in uninstall.cmake @ONLY)
 add_custom_target(uninstall
