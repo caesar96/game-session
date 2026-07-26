@@ -4,8 +4,8 @@ project(game-session LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-add_executable(game-session game-session.cpp)
-add_executable(game-session-helper game-session-helper.cpp)
+add_executable(game-session game-session.cpp amdgpu_overdrive.cpp)
+add_executable(game-session-helper game-session-helper.cpp amdgpu_overdrive.cpp)
 
 install(TARGETS game-session game-session-helper
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

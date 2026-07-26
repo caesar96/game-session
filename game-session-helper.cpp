@@ -1,25 +1,17 @@
+#include "amdgpu_overdrive.hpp"
+
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <sys/stat.h>
 
-static const std::string SYSFS_BASE = "/sys/class/drm/card1/device";
+static std::unique_ptr<AmdgpuOverdrive> g_od;
 static std::string HWMON;
 
-static std::string find_hwmon() {
-    for (int i = 0; i < 16; i++) {
-        auto d = std::string("/sys/class/drm/card1/device/hwmon/hwmon") + std::to_string(i);
-        struct stat st;
-        if (stat(d.c_str(), &st) != 0) continue;
-        std::ifstream f(d + "/name");
-        std::string name;
-        f >> name;
-        if (name.find("amdgpu") != std::string::npos) return d;
-    }
-    return {};
-}
+// ── sysfs I/O ────────────────────────────────────────────────────────────────
 
 static bool write_sysfs(const std::string &path, const std::string &val) {
     std::ofstream f(path);
@@ -45,6 +37,8 @@ static bool is_signed_number(const std::string &v) {
     return true;
 }
 
+// ── entry ────────────────────────────────────────────────────────────────────
+
 int main(int argc, char *argv[]) {
     if (argc < 2) {
         std::cerr << "usage: game-session-helper <action> [value]\n"
@@ -53,6 +47,7 @@ int main(int argc, char *argv[]) {
                   << "  power-cap      <uwatts>\n"
                   << "  od-sclk-min    <freq>\n"
                   << "  od-sclk-max    <freq>\n"
+                  << "  od-mclk-min    <freq>\n"
                   << "  od-mclk-max    <freq>\n"
                   << "  od-voltage     <offset>\n"
                   << "  od-commit\n"
@@ -62,23 +57,25 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    HWMON = find_hwmon();
+    g_od = AmdgpuOverdrive::create();
+    if (g_od && !g_od->hwmon_path().empty()) HWMON = g_od->hwmon_path().string();
 
     std::string action = argv[1];
     std::string value  = (argc > 2) ? argv[2] : "";
-    auto od = SYSFS_BASE + "/pp_od_clk_voltage";
+
+    // ── non-OD actions (direct sysfs) ────────────────────────────────────────
 
     if (action == "force-level") {
         if (value != "auto" && value != "low" && value != "high" && value != "manual") {
             std::cerr << "invalid force-level: " << value << "\n";
             return 1;
         }
-        return write_sysfs(SYSFS_BASE + "/power_dpm_force_performance_level", value + "\n") ? 0 : 1;
+        return write_sysfs(g_od->device_path().string() + "/power_dpm_force_performance_level", value + "\n") ? 0 : 1;
     }
 
     if (action == "profile") {
         if (!is_number(value)) { std::cerr << "invalid profile\n"; return 1; }
-        return write_sysfs(SYSFS_BASE + "/pp_power_profile_mode", value + "\n") ? 0 : 1;
+        return write_sysfs(g_od->device_path().string() + "/pp_power_profile_mode", value + "\n") ? 0 : 1;
     }
 
     if (action == "power-cap") {
@@ -87,33 +84,79 @@ int main(int argc, char *argv[]) {
         return write_sysfs(HWMON + "/power1_cap", value + "\n") ? 0 : 1;
     }
 
+    // ── OverDrive actions ────────────────────────────────────────────────────
+
+    if (!g_od || !g_od->valid()) {
+        std::cerr << "AMD GPU not found\n";
+        return 1;
+    }
+
     if (action == "od-sclk-min") {
         if (!is_number(value)) { std::cerr << "invalid sclk min\n"; return 1; }
-        return write_sysfs(od, "s 0 " + value + "\n") ? 0 : 1;
+        int v = std::stoi(value);
+        if (!g_od->sclk_min_valid(v)) {
+            auto l = g_od->read_limits();
+            std::cerr << "sclk min out of range [" << l.sclk_min << ", " << l.sclk_max << "]\n";
+            return 1;
+        }
+        return g_od->set_sclk_min(v) ? 0 : 1;
     }
 
     if (action == "od-sclk-max") {
         if (!is_number(value)) { std::cerr << "invalid sclk max\n"; return 1; }
-        return write_sysfs(od, "s 1 " + value + "\n") ? 0 : 1;
+        int v = std::stoi(value);
+        if (!g_od->sclk_max_valid(v)) {
+            auto l = g_od->read_limits();
+            std::cerr << "sclk max out of range [" << l.sclk_min << ", " << l.sclk_max << "]\n";
+            return 1;
+        }
+        return g_od->set_sclk_max(v) ? 0 : 1;
+    }
+
+    if (action == "od-mclk-min") {
+        if (!is_number(value)) { std::cerr << "invalid mclk min\n"; return 1; }
+        int v = std::stoi(value);
+        if (!g_od->mclk_min_valid(v)) {
+            auto l = g_od->read_limits();
+            std::cerr << "mclk min out of range [" << l.mclk_min << ", " << l.mclk_max << "]\n";
+            return 1;
+        }
+        return g_od->set_mclk_min(v) ? 0 : 1;
     }
 
     if (action == "od-mclk-max") {
         if (!is_number(value)) { std::cerr << "invalid mclk max\n"; return 1; }
-        return write_sysfs(od, "m 1 " + value + "\n") ? 0 : 1;
+        int v = std::stoi(value);
+        if (!g_od->mclk_max_valid(v)) {
+            auto l = g_od->read_limits();
+            std::cerr << "mclk max out of range [" << l.mclk_min << ", " << l.mclk_max << "]\n";
+            return 1;
+        }
+        return g_od->set_mclk_max(v) ? 0 : 1;
     }
 
     if (action == "od-voltage") {
         if (!is_signed_number(value)) { std::cerr << "invalid voltage offset\n"; return 1; }
-        return write_sysfs(od, "vo " + value + "\n") ? 0 : 1;
+        int v = std::stoi(value);
+        if (!g_od->voltage_offset_valid(v)) {
+            auto l = g_od->read_limits();
+            std::cerr << "voltage offset out of range [" << l.vddgfx_offset_min << ", " << l.vddgfx_offset_max << "]\n";
+            return 1;
+        }
+        return g_od->set_voltage_offset(v) ? 0 : 1;
     }
 
     if (action == "od-commit") {
-        return write_sysfs(od, "c\n") ? 0 : 1;
+        return g_od->commit() ? 0 : 1;
     }
 
     if (action == "od-reset") {
-        return write_sysfs(od, "r\n") ? 0 : 1;
+        bool ok = g_od->reset();
+        if (ok) g_od->commit();
+        return ok ? 0 : 1;
     }
+
+    // ── fan actions ──────────────────────────────────────────────────────────
 
     if (action == "fan-enable") {
         if (value != "1" && value != "2") { std::cerr << "invalid fan-enable (1=manual, 2=auto)\n"; return 1; }

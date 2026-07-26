@@ -1,3 +1,5 @@
+#include "amdgpu_overdrive.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <array>
@@ -7,10 +9,9 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
-#include <map>
-#include <mutex>
-#include <signal.h>
+#include <memory>
 #include <sstream>
+#include <signal.h>
 #include <string>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -70,33 +71,26 @@ static std::string trim(const std::string &s) {
     return s.substr(start, end - start + 1);
 }
 
-static bool starts_with(const std::string &s, const std::string &pfx) {
-    return s.size() >= pfx.size() && s.compare(0, pfx.size(), pfx) == 0;
-}
-
 static std::string env_or(const char *key, const std::string &def) {
     const char *v = std::getenv(key);
     return v ? std::string(v) : def;
 }
 
 static std::string find_hwmon() {
-    const char *base = "/sys/class/drm/card1/device/hwmon";
-    for (int i = 0; i < 16; i++) {
-        std::string d = std::string(base) + "/hwmon" + std::to_string(i);
-        std::string n = read_file_trim(d + "/name");
-        if (n.find("amdgpu") != std::string::npos) return d;
-    }
+    auto od = AmdgpuOverdrive::create();
+    if (od && !od->hwmon_path().empty()) return od->hwmon_path().string();
     return {};
 }
 
 static std::string sysfs_base() {
+    auto od = AmdgpuOverdrive::create();
+    if (od) return od->device_path().string();
     return "/sys/class/drm/card1/device";
 }
 
 // ── TOML-like config parser ─────────────────────────────────────────────────
 
 struct Config {
-    // gpu
     std::string force_level = "high";
     std::string profile = "1";
     std::string power_cap = "120000000";
@@ -104,13 +98,12 @@ struct Config {
     std::string max_clock;
     std::string memory_clock;
     std::string voltage_offset;
-    // fan
     bool fan_enabled = false;
     int fan_start = 50;
     int fan_interval_ms = 250;
     int fan_hysteresis = 2;
     int fan_emergency_temp = 85;
-    std::vector<std::pair<int,int>> fan_curve; // temp:pwm
+    std::vector<std::pair<int,int>> fan_curve;
 };
 
 static Config g_config;
@@ -267,15 +260,7 @@ static void helper_write(const std::string &action, const std::string &val) {
     exec_cmd(cmd);
 }
 
-// ── GPU state ───────────────────────────────────────────────────────────────
-
-struct GpuState {
-    std::string force_level;
-    std::string profile_index;
-    std::string power_cap;
-    std::string od_full;         // raw pp_od_clk_voltage content
-    std::string pwm1_enable;
-};
+// ── GPU state (non-OD settings only) ────────────────────────────────────────
 
 static bool file_exists(const std::string &p) {
     struct stat st;
@@ -283,13 +268,14 @@ static bool file_exists(const std::string &p) {
 }
 
 static std::string detect_od_interface() {
-    auto p = sysfs_base() + "/pp_od_clk_voltage";
-    if (!file_exists(p)) return "none";
-    auto content = read_file(p);
-    if (content.find("OD_VDDGFX_OFFSET") != std::string::npos) return "rdna2";
-    if (content.find("OD_RANGE") != std::string::npos) return "rdna1";
-    if (content.find("OD_SCLK") != std::string::npos) return "legacy";
-    return "unknown";
+    auto od = AmdgpuOverdrive::create();
+    if (!od) return "none";
+    switch (od->interface()) {
+        case AmdgpuOverdrive::Interface::rdna2: return "rdna2";
+        case AmdgpuOverdrive::Interface::rdna1: return "rdna1";
+        case AmdgpuOverdrive::Interface::legacy: return "legacy";
+        default: return "none";
+    }
 }
 
 static bool save_gpu_state(const std::string &dir) {
@@ -319,8 +305,6 @@ static bool save_gpu_state(const std::string &dir) {
         write_file(d + "/power_cap", read_file_trim(hwmon_path + "/power1_cap"));
         write_file(d + "/pwm1_enable", read_file_trim(hwmon_path + "/pwm1_enable"));
     }
-    auto od_path = base + "/pp_od_clk_voltage";
-    if (file_exists(od_path)) write_file(d + "/od", read_file(od_path));
     return true;
 }
 
@@ -341,7 +325,6 @@ static void apply_gpu() {
             helper_write("od-mclk-max", g_config.memory_clock);
         if (!g_config.voltage_offset.empty())
             helper_write("od-voltage", g_config.voltage_offset);
-        // commit if any OD value was set
         if (!g_config.min_clock.empty() || !g_config.max_clock.empty() ||
             !g_config.memory_clock.empty() || !g_config.voltage_offset.empty()) {
             helper_write("od-commit", "");
@@ -362,16 +345,14 @@ static void restore_gpu() {
     v = read_file_trim(d + "/power_cap");
     if (!v.empty()) helper_write("power-cap", v);
 
-    // restore OD: reset to kernel defaults (this undoes any overclock)
-    auto od_path = sysfs_base() + "/pp_od_clk_voltage";
-    if (file_exists(od_path)) {
-        // if we applied OD overrides, reset them
+    // Reset OverDrive to VBIOS defaults — no state was saved, just reset
+    auto od = AmdgpuOverdrive::create();
+    if (od && od->valid()) {
         if (!g_config.min_clock.empty() || !g_config.max_clock.empty() ||
             !g_config.memory_clock.empty() || !g_config.voltage_offset.empty()) {
             helper_write("od-reset", "");
         }
     }
-
 }
 
 // ── monitor ─────────────────────────────────────────────────────────────────
@@ -500,7 +481,6 @@ static int interpolate_pwm(int temp, const std::vector<FanPoint> &curve, int fan
 static void fan_loop(std::atomic<bool> &running, const Config &cfg) {
     if (hwmon_path.empty() || !cfg.fan_enabled) return;
 
-    // enable manual fan mode via helper (needs root)
     helper_write("fan-enable", "1");
 
     std::vector<FanPoint> curve;
@@ -533,7 +513,6 @@ static void fan_loop(std::atomic<bool> &running, const Config &cfg) {
         std::this_thread::sleep_for(std::chrono::milliseconds(cfg.fan_interval_ms));
     }
 
-    // restore auto fan mode via helper
     helper_write("fan-enable", "2");
 }
 
@@ -584,8 +563,14 @@ static void apply_default_env() {
 // ── dump ────────────────────────────────────────────────────────────────────
 
 static void cmd_dump() {
-    auto base = sysfs_base();
-    hwmon_path = find_hwmon();
+    auto od = AmdgpuOverdrive::create();
+    if (!od) {
+        std::cerr << "AMD GPU not found\n";
+        return;
+    }
+
+    auto base = od->device_path().string();
+    hwmon_path = od->hwmon_path().string();
 
     std::cout << "GPU\n";
     std::cout << "  device:   " << base << "\n";
@@ -607,10 +592,21 @@ static void cmd_dump() {
         std::cout << "  temp:       " << read_file_trim(hwmon_path + "/temp1_input") << " millideg\n";
     }
 
-    auto od_path = base + "/pp_od_clk_voltage";
-    if (file_exists(od_path)) {
+    if (od->valid()) {
         std::cout << "\npp_od_clk_voltage:\n";
-        std::cout << read_file(od_path);
+        auto s = od->read_state();
+        auto l = od->read_limits();
+        std::cout << "OD_SCLK:\n";
+        std::cout << "0: " << s.sclk_min << "Mhz\n";
+        std::cout << "1: " << s.sclk_max << "Mhz\n";
+        std::cout << "OD_MCLK:\n";
+        std::cout << "0: " << s.mclk_min << "Mhz\n";
+        std::cout << "1: " << s.mclk_max << "MHz\n";
+        std::cout << "OD_RANGE:\n";
+        std::cout << "SCLK:     " << l.sclk_min << "Mhz       " << l.sclk_max << "Mhz\n";
+        std::cout << "MCLK:     " << l.mclk_min << "Mhz        " << l.mclk_max << "Mhz\n";
+        std::cout << "OD_VDDGFX_OFFSET:\n";
+        std::cout << s.vddgfx_offset << "mV\n";
     }
 
     if (!hwmon_path.empty()) {
@@ -654,13 +650,11 @@ int main(int argc, char *argv[]) {
     load_config();
     apply_default_env();
 
-    // dump command
     if (std::string(argv[1]) == "dump") {
         cmd_dump();
         return 0;
     }
 
-    // create temp state dir
     char buf[64];
     std::strcpy(buf, "/tmp/game-session-XXXXXX");
     if (!mkdtemp(buf)) {
@@ -678,7 +672,6 @@ int main(int argc, char *argv[]) {
     apply_gpu();
     apply_monitor();
 
-    // build command: game-performance <user args...>
     std::vector<const char *> cmd_vec = {"game-performance"};
     for (int i = 1; i < argc; i++) cmd_vec.push_back(argv[i]);
     cmd_vec.push_back(nullptr);
@@ -696,7 +689,6 @@ int main(int argc, char *argv[]) {
         _exit(127);
     }
 
-    // fan controller thread
     std::atomic<bool> fan_running{true};
     std::thread fan_thread;
     if (g_config.fan_enabled && !hwmon_path.empty()) {
