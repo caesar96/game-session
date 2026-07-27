@@ -6,7 +6,7 @@ pkgdesc="AMD GPU overclock, fan curve, monitor HDR/presets and CPU optimizations
 arch=('x86_64')
 url="https://github.com/caesar96/game-session"
 license=('MIT')
-depends=('glibc' 'gcc-libs' 'kscreen-doctor')
+depends=('glibc' 'gcc-libs' 'libkscreen')
 makedepends=('cmake' 'gcc')
 optdepends=(
     'game-performance: CPU governor and sleep inhibit (CachyOS)'
@@ -18,8 +18,15 @@ source=()
 sha256sums=()
 
 prepare() {
+    rm -rf "${srcdir}/${pkgname}"
     mkdir -p "${srcdir}/${pkgname}"
-    cp -r "${PWD}"/* "${srcdir}/${pkgname}/"
+    # copy everything except makepkg working dirs and build artifacts
+    for f in "${PWD}"/*; do
+        case "${f##*/}" in
+            src|pkg|build) ;;
+            *) cp -r "$f" "${srcdir}/${pkgname}/" ;;
+        esac
+    done
 }
 
 build() {
