@@ -317,12 +317,16 @@ static std::string helper_path() {
     const char *env = std::getenv("GS_HELPER");
     if (env) return env;
     struct stat st;
-    if (stat("/usr/local/bin/game-session-helper", &st) == 0)
-        return "/usr/local/bin/game-session-helper";
+    std::vector<std::string> candidates = {
+        "/usr/bin/game-session-helper",
+        "/usr/local/bin/game-session-helper",
+    };
     const char *home = std::getenv("HOME");
     if (home) {
-        auto local = std::string(home) + "/.local/bin/game-session-helper";
-        if (stat(local.c_str(), &st) == 0) return local;
+        candidates.push_back(std::string(home) + "/.local/bin/game-session-helper");
+    }
+    for (const auto &p : candidates) {
+        if (stat(p.c_str(), &st) == 0) return p;
     }
     return "game-session-helper";
 }

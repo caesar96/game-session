@@ -17,29 +17,15 @@ conflicts=('game-session')
 source=()
 sha256sums=()
 
-prepare() {
-    rm -rf "${srcdir}/${pkgname}"
-    mkdir -p "${srcdir}/${pkgname}"
-    # copy everything except makepkg working dirs and build artifacts
-    for f in "${PWD}"/*; do
-        case "${f##*/}" in
-            src|pkg|build) ;;
-            *) cp -r "$f" "${srcdir}/${pkgname}/" ;;
-        esac
-    done
-}
-
 build() {
-    cd "${srcdir}/${pkgname}"
-    cmake -B build \
+    cmake -S "${startdir}" -B "${startdir}/build" \
         -DCMAKE_INSTALL_PREFIX=/usr \
         -DCMAKE_BUILD_TYPE=Release
-    cmake --build build
+    cmake --build "${startdir}/build"
 }
 
 package() {
-    cd "${srcdir}/${pkgname}"
-    DESTDIR="${pkgdir}" cmake --install build
+    DESTDIR="${pkgdir}" cmake --install "${startdir}/build"
 
     # Generate sudoers with wheel group so any admin user can use it
     install -Dm440 /dev/stdin "${pkgdir}/etc/sudoers.d/game-session" <<EOF
