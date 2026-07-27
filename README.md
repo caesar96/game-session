@@ -1,18 +1,19 @@
 # game-session
 
-A lightweight C++ wrapper that optimises your AMD GPU and monitor settings for
-gaming and restores everything when you're done. Sits in Steam's launch options
-and chains into CachyOS's `game-performance`.
+A lightweight C++ wrapper that applies an AMD GPU and monitor gaming profile,
+then restores the monitor and resets the GPU to its default/automatic state
+when you're done. It sits in Steam's launch options and chains into CachyOS's
+`game-performance`.
 
 ```
 game-session %command%
-   ├── save current GPU state (sysfs) + monitor preset (DDC/CI)
+   ├── save monitor + HDR state (DDC/CI / kscreen-doctor)
    ├── apply gaming profile:
    │   ├── GPU: power profile, power cap, overclock (OD), force level
    │   ├── monitor: picture mode, response time, black stabiliser, colour
    │   └── fan: custom temperature‑based curve
    ├── game-performance <your command>    ← blocks until the game exits
-   └── restore everything
+   └── restore monitor; reset GPU to defaults/automatic mode
 ```
 
 ## Features
@@ -20,15 +21,18 @@ game-session %command%
 - **AMD GPU OverDrive** — SCLK, MCLK, voltage offset with automatic interface
   detection (RDNA 1/2, legacy). Validates against hardware limits.
 - **Monitor DDC/CI** — switches to a gaming picture preset (FPS, RTS, …) and
-  restores the original values afterwards.
+  restores the original values afterwards. HDR is temporarily disabled before
+  restore when necessary, then returned to its pre-session state.
 - **Custom fan curve** — temperature‑based PWM interpolation with hysteresis
   and an emergency thermal throttle override.
 - **Flicker‑free** — OD changes are applied in `auto` mode, then locked with
   `force_level=high` last. The monitor never sees a frequency transition.
 - **CPU / sleep** — delegates to CachyOS's `game-performance` for performance
   governor and suspend inhibition.
-- **Save/restore** — snapshots current GPU + monitor state, restores on exit
-  even when killed (SIGINT/SIGTERM/SIGQUIT).
+- **Restore defaults** — returns GPU OverDrive to VBIOS defaults, force level
+  to `auto`, profile to `BOOTUP_DEFAULT`, power cap to the driver default and
+  fan control to automatic on exit (SIGINT/SIGTERM/SIGQUIT included). Monitor
+  state is snapshot and restored separately.
 - **Configurable** — environment variables, config file, or both. Env always
   overrides file.
 - **Steam‑friendly** — drops into `%command%` and auto‑exports common Proton
@@ -89,9 +93,9 @@ game-session dump     # diagnostic — no side effects
 | `GS_FAN_HYSTERESIS` | `2` | °C change needed before recalculating PWM |
 | `GS_FAN_EMERGENCY_TEMP` | `85` | Above this → fan forced to 100 % |
 | `GS_FAN_CURVE` | — | Fan curve: comma‑separated `temp:pwm` pairs |
-| `MONITOR_PRESET` | — | Monitor picture preset: `FPS`, `RTS`, `Gamer 1`, `Gamer 2`, `Vivid`, `Reader`, `HDR Effect` |
+| `GS_MONITOR_PRESET` | — | Monitor picture preset: `FPS`, `RTS`, `Gamer 1`, `Gamer 2`, `Vivid`, `Reader`, `HDR Effect`. `MONITOR_PRESET` remains supported as an alias. |
 | `MONITOR_MATCH` | `GSM` | String to match in `ddcutil detect --brief` output |
-| `GS_HDR` | `true` | Enable HDR via kscreen-doctor (`true` / `1` = enable, `0` = skip) |
+| `GS_HDR` | `false` | Enable HDR via kscreen-doctor (`true` / `1` = enable, `0` = skip) |
 | `GS_HDR_OUTPUT` | `DP-1` | Display output name for HDR (e.g. `DP-1`, `HDMI-A-1`) |
 | `GS_HELPER` | auto‑detected | Override path to `game-session-helper` binary |
 
@@ -111,7 +115,7 @@ voltage_offset = -5
 
 [monitor]
 preset = RTS
-hdr = true
+hdr = false
 hdr_output = DP-1
 
 [fan]
@@ -190,8 +194,8 @@ game-session ./mygame
   ├─ load_config()            ← config file
   ├─ apply_default_env()      ← Proton / MangoHud defaults
   │
-  ├─ save_gpu_state()         ← read sysfs
   ├─ save_monitor_state()     ← ddcutil getvcp
+  ├─ save_hdr_state()         ← remembers the HDR state before the session
   │
   ├─ apply_gpu()
   │   └─ profile              ← sudo helper profile 1
@@ -207,9 +211,10 @@ game-session ./mygame
   ├─ waitpid
   │
   ├─ stop fan thread
+  ├─ disable HDR temporarily  ← lets DDC/CI presets apply reliably
   ├─ restore_monitor()
-  ├─ restore_hdr()            ← kscreen-doctor output.DP-1.hdr.disable
-  ├─ restore_gpu()            ← force-level, profile, power-cap, od-reset
+  ├─ restore_hdr()            ← restores the HDR state from before the session
+  ├─ restore_gpu_defaults()   ← od-reset, then auto/profile 0/default cap/fan auto
   └─ rm -rf /tmp/game-session-XXXXX
 ```
 

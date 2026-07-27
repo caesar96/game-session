@@ -87,6 +87,8 @@ int main(int argc, char *argv[]) {
 
     if (action == "profile") {
         if (!is_number(value)) { std::cerr << "invalid profile\n"; return 1; }
+        int profile = safe_stoi(value);
+        if (profile < 0 || profile > 6) { std::cerr << "profile out of range (0-6)\n"; return 1; }
         if (DEVICE_PATH.empty()) { std::cerr << "GPU not found\n"; return 1; }
         return write_sysfs(DEVICE_PATH + "/pp_power_profile_mode", value + "\n") ? 0 : 1;
     }

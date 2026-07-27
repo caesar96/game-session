@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -11,6 +13,7 @@
 #include <fcntl.h>
 #include <fstream>
 #include <iostream>
+#include <filesystem>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -24,7 +27,6 @@
 
 static std::string state_dir;
 static volatile sig_atomic_t g_child_pid = 0;
-static volatile sig_atomic_t g_shutdown = 0;
 static std::string hwmon_path;
 
 // ── util ────────────────────────────────────────────────────────────────────
@@ -138,12 +140,6 @@ static std::string find_hwmon() {
     return {};
 }
 
-static std::string sysfs_base() {
-    auto od = AmdgpuOverdrive::create();
-    if (od) return od->device_path().string();
-    return "/sys/class/drm/card1/device";
-}
-
 // ── TOML-like config parser ─────────────────────────────────────────────────
 
 struct Config {
@@ -167,6 +163,19 @@ struct Config {
 
 static Config g_config;
 
+static std::vector<std::pair<int, int>> parse_fan_curve(const std::string &value) {
+    std::vector<std::pair<int, int>> curve;
+    std::istringstream stream(value);
+    std::string token;
+    while (std::getline(stream, token, ',')) {
+        const auto colon = token.find(':');
+        if (colon == std::string::npos) continue;
+        curve.emplace_back(safe_stoi(trim(token.substr(0, colon))),
+                           safe_stoi(trim(token.substr(colon + 1))));
+    }
+    return curve;
+}
+
 static void parse_env_config(Config &cfg) {
     if (auto v = env_or("GS_GPU_FORCE_LEVEL", ""); !v.empty()) cfg.force_level = v;
     if (auto v = env_or("GS_GPU_PROFILE", ""); !v.empty()) cfg.profile = v;
@@ -181,17 +190,10 @@ static void parse_env_config(Config &cfg) {
     if (auto v = env_or("GS_FAN_HYSTERESIS", ""); !v.empty()) cfg.fan_hysteresis = safe_stoi(v, 2);
     if (auto v = env_or("GS_FAN_EMERGENCY_TEMP", ""); !v.empty()) cfg.fan_emergency_temp = safe_stoi(v, 85);
     if (auto v = env_or("GS_FAN_CURVE", ""); !v.empty()) {
-        cfg.fan_curve.clear();
-        std::istringstream ss(v);
-        std::string token;
-        while (std::getline(ss, token, ',')) {
-            auto col = token.find(':');
-            if (col != std::string::npos)
-                cfg.fan_curve.push_back({safe_stoi(token.substr(0, col)),
-                                          safe_stoi(token.substr(col + 1))});
-        }
+        cfg.fan_curve = parse_fan_curve(v);
     }
     if (auto v = env_or("GS_MONITOR_PRESET", ""); !v.empty()) cfg.monitor_preset = v;
+    else if (auto v = env_or("MONITOR_PRESET", ""); !v.empty()) cfg.monitor_preset = v;
     if (auto v = env_or("GS_HDR", ""); !v.empty()) cfg.hdr = (v == "true" || v == "1");
     if (auto v = env_or("GS_HDR_OUTPUT", ""); !v.empty()) cfg.hdr_output = v;
 }
@@ -232,15 +234,7 @@ static void parse_config_file(Config &cfg, const std::string &path) {
         else if (skey == "monitor.hdr" || key == "GS_HDR") cfg.hdr = (val == "true" || val == "1");
         else if (skey == "monitor.hdr_output" || key == "GS_HDR_OUTPUT") cfg.hdr_output = val;
         else if (skey == "fan.curve" || key == "GS_FAN_CURVE") {
-            cfg.fan_curve.clear();
-            std::istringstream vs(val);
-            std::string tok;
-            while (std::getline(vs, tok, ',')) {
-                auto col = tok.find(':');
-                if (col != std::string::npos)
-                    cfg.fan_curve.push_back({safe_stoi(tok.substr(0, col)),
-                                              safe_stoi(tok.substr(col + 1))});
-            }
+            cfg.fan_curve = parse_fan_curve(val);
         }
     }
 }
@@ -278,8 +272,8 @@ static void ensure_config() {
          "# start           = temperature to start fan curve at\n"
          "# interval_ms     = PWM update interval\n"
          "# hysteresis      = temp change needed before recalculating PWM\n"
-          "# emergency_temp  = above this -> 100 %% fan\n"
-          "# curve           = temp:pwm,...  (e.g. 40:50,50:58,60:70,65:90,70:100)\n"
+         "# emergency_temp  = above this -> 100 %% fan\n"
+         "# curve           = temp:pwm,...  (e.g. 40:50,50:58,60:70,65:90,70:100)\n"
          "#\n"
          "# [monitor]\n"
          "# preset          = monitor picture mode: FPS, RTS, Gamer 1, Gamer 2, Vivid, Reader, HDR Effect\n"
@@ -302,13 +296,43 @@ static void ensure_config() {
          "interval_ms = 250\n"
          "hysteresis = 2\n"
          "emergency_temp = 85\n"
-         "# curve = 40:50,50:58,60:70,65:90,70:100\n";
+         "# curve = 40:50,50:58,60:70,65:90,70:100\n"
+         "\n"
+         "[monitor]\n"
+         "# preset = Reader\n"
+         "hdr = false\n"
+         "hdr_output = DP-1\n";
 }
 
-static void load_config() {
+static bool validate_config(Config &cfg) {
+    if (cfg.force_level != "auto" && cfg.force_level != "low" &&
+        cfg.force_level != "high" && cfg.force_level != "manual") {
+        std::cerr << "invalid GS_GPU_FORCE_LEVEL: " << cfg.force_level << "\n";
+        return false;
+    }
+    if (cfg.fan_interval_ms < 50 || cfg.fan_interval_ms > 10000 ||
+        cfg.fan_hysteresis < 0 || cfg.fan_start < 0 ||
+        cfg.fan_emergency_temp <= cfg.fan_start) {
+        std::cerr << "invalid fan timing or temperature configuration\n";
+        return false;
+    }
+    std::sort(cfg.fan_curve.begin(), cfg.fan_curve.end());
+    for (size_t i = 0; i < cfg.fan_curve.size(); ++i) {
+        const auto [temp, pwm] = cfg.fan_curve[i];
+        if (temp < 0 || pwm < 0 || pwm > 255 ||
+            (i > 0 && temp == cfg.fan_curve[i - 1].first)) {
+            std::cerr << "invalid fan curve; temperatures must be unique and PWM must be 0-255\n";
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool load_config() {
     ensure_config();
     parse_config_file(g_config, config_path());
     parse_env_config(g_config);
+    return validate_config(g_config);
 }
 
 // ── helper (sudo) ───────────────────────────────────────────────────────────
@@ -331,14 +355,14 @@ static std::string helper_path() {
     return "game-session-helper";
 }
 
-static void helper_write(const std::string &action, const std::string &val) {
+static bool helper_write(const std::string &action, const std::string &val) {
     auto hp = helper_path();
     std::vector<const char *> args = {"sudo", hp.c_str(), action.c_str()};
     if (!val.empty()) args.push_back(val.c_str());
     args.push_back(nullptr);
 
     pid_t pid = fork();
-    if (pid < 0) return;
+    if (pid < 0) return false;
 
     if (pid == 0) {
         execvp("sudo", const_cast<char *const *>(args.data()));
@@ -346,10 +370,11 @@ static void helper_write(const std::string &action, const std::string &val) {
     }
 
     int status;
-    waitpid(pid, &status, 0);
+    return waitpid(pid, &status, 0) == pid &&
+           WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
-// ── GPU state (non-OD settings only) ────────────────────────────────────────
+// ── GPU profile ─────────────────────────────────────────────────────────────
 
 static std::string detect_od_interface() {
     auto od = AmdgpuOverdrive::create();
@@ -362,85 +387,47 @@ static std::string detect_od_interface() {
     }
 }
 
-static bool save_gpu_state(const std::string &dir) {
-    auto d = dir + "/gpu";
-    if (mkdir(d.c_str(), 0755) != 0) {
-        if (errno != EEXIST) return false;
-    }
-    auto base = sysfs_base();
-    write_file(d + "/force_level", read_file_trim(base + "/power_dpm_force_performance_level"));
-    auto pm = read_file(base + "/pp_power_profile_mode");
-    std::string pidx;
-    std::istringstream ss(pm);
-    std::string line;
-    while (std::getline(ss, line)) {
-        if (line.find("*:") != std::string::npos) {
-            std::istringstream(line) >> pidx;
-            break;
-        }
-    }
-    if (pidx.empty()) {
-        std::istringstream ss2(pm);
-        while (std::getline(ss2, line)) {
-            int v;
-            if (std::istringstream(line) >> v) { pidx = std::to_string(v); break; }
-        }
-    }
-    write_file(d + "/profile_index", pidx);
-    if (!hwmon_path.empty()) {
-        write_file(d + "/power_cap", read_file_trim(hwmon_path + "/power1_cap"));
-        write_file(d + "/pwm1_enable", read_file_trim(hwmon_path + "/pwm1_enable"));
-    }
-    return true;
-}
-
-static void apply_gpu() {
-    auto base = sysfs_base();
-    helper_write("profile", g_config.profile);
+static bool apply_gpu() {
+    if (!helper_write("profile", g_config.profile)) return false;
     if (!hwmon_path.empty())
-        helper_write("power-cap", g_config.power_cap);
+        if (!helper_write("power-cap", g_config.power_cap)) return false;
 
     // Apply OverDrive changes first while still in auto
     auto od_iface = detect_od_interface();
     if (od_iface == "rdna2" || od_iface == "rdna1" || od_iface == "legacy") {
         if (!g_config.min_clock.empty())
-            helper_write("od-sclk-min", g_config.min_clock);
+            if (!helper_write("od-sclk-min", g_config.min_clock)) return false;
         if (!g_config.max_clock.empty())
-            helper_write("od-sclk-max", g_config.max_clock);
+            if (!helper_write("od-sclk-max", g_config.max_clock)) return false;
         if (!g_config.memory_clock.empty())
-            helper_write("od-mclk-max", g_config.memory_clock);
+            if (!helper_write("od-mclk-max", g_config.memory_clock)) return false;
         if (!g_config.voltage_offset.empty())
-            helper_write("od-voltage", g_config.voltage_offset);
+            if (!helper_write("od-voltage", g_config.voltage_offset)) return false;
         if (!g_config.min_clock.empty() || !g_config.max_clock.empty() ||
             !g_config.memory_clock.empty() || !g_config.voltage_offset.empty()) {
-            helper_write("od-commit", "");
+            if (!helper_write("od-commit", "")) return false;
         }
     }
 
     // Lock frequencies last to avoid flickering from OD transitions
-    helper_write("force-level", g_config.force_level);
+    return helper_write("force-level", g_config.force_level);
 }
 
-static void restore_gpu() {
-    auto d = state_dir + "/gpu";
-    std::string v;
-
-    v = read_file_trim(d + "/force_level");
-    if (!v.empty()) helper_write("force-level", v);
-
-    v = read_file_trim(d + "/profile_index");
-    if (!v.empty()) helper_write("profile", v);
-
-    v = read_file_trim(d + "/power_cap");
-    if (!v.empty()) helper_write("power-cap", v);
-
-    // Reset OverDrive to VBIOS defaults — no state was saved, just reset
+static void restore_gpu_defaults() {
+    // Reset OverDrive first. force-level=auto must be written afterwards so the
+    // driver is not left locked while it returns to the VBIOS defaults.
     auto od = AmdgpuOverdrive::create();
     if (od && od->valid()) {
-        if (!g_config.min_clock.empty() || !g_config.max_clock.empty() ||
-            !g_config.memory_clock.empty() || !g_config.voltage_offset.empty()) {
-            helper_write("od-reset", "");
-        }
+        helper_write("od-reset", "");
+    }
+
+    helper_write("force-level", "auto");
+    helper_write("profile", "0"); // BOOTUP_DEFAULT
+
+    if (!hwmon_path.empty()) {
+        const auto default_power_cap = read_file_trim(hwmon_path + "/power1_cap_default");
+        if (!default_power_cap.empty()) helper_write("power-cap", default_power_cap);
+        helper_write("fan-enable", "2"); // automatic fan control
     }
 }
 
@@ -481,9 +468,15 @@ static std::string monitor_read_vcp(const std::string &bus, const std::string &v
     auto cv = out.find("current value = ");
     if (cv != std::string::npos) {
         auto val = out.substr(cv + 16);
-        auto end = val.find_first_of(" \t\n\r");
-        if (end != std::string::npos) val = val.substr(0, end);
-        return val;
+        // ddcutil prints decimal or hexadecimal values followed by punctuation
+        // (for example: "current value = 0x01, maximum value = ...").
+        size_t end = 0;
+        while (end < val.size() &&
+               (std::isdigit(static_cast<unsigned char>(val[end])) ||
+                (val[end] >= 'a' && val[end] <= 'f') ||
+                (val[end] >= 'A' && val[end] <= 'F') ||
+                val[end] == 'x' || val[end] == 'X')) ++end;
+        return val.substr(0, end);
     }
     return {};
 }
@@ -511,12 +504,7 @@ static Preset get_preset(const std::string &name) {
 }
 
 static bool monitor_enabled() {
-    if (!g_config.monitor_preset.empty()) return true;
-    if (auto e = std::getenv("MONITOR_PRESET")) {
-        g_config.monitor_preset = e;
-        return true;
-    }
-    return false;
+    return !g_config.monitor_preset.empty();
 }
 
 // ── HDR (kscreen-doctor) ──────────────────────────────────────────────────
@@ -561,7 +549,10 @@ static std::string hdr_current_state(const std::string &output) {
 }
 
 static void save_hdr_state(const std::string &dir) {
-    if (!g_config.hdr) return;
+    // A monitor preset may need HDR disabled during restoration even when this
+    // session did not enable HDR itself.  Save the pre-session state whenever
+    // either feature is in use so cleanup can restore the picture mode first.
+    if (!g_config.hdr && !monitor_enabled()) return;
     auto d = dir + "/monitor";
     mkdir(d.c_str(), 0755);
     auto state = hdr_current_state(g_config.hdr_output);
@@ -575,36 +566,55 @@ static void apply_hdr() {
               {"output." + g_config.hdr_output + ".hdr.enable"});
 }
 
-static void restore_hdr() {
+static bool saved_hdr_was_enabled() {
     auto d = state_dir + "/monitor";
     auto state = read_file_trim(d + "/hdr_state");
-    if (state.empty()) return;
-    if (state == "disabled")
+    std::transform(state.begin(), state.end(), state.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+    return state == "enabled";
+}
+
+static void disable_hdr_for_monitor_restore() {
+    if (read_file_trim(state_dir + "/monitor/hdr_state").empty()) return;
+    exec_argv("kscreen-doctor",
+              {"output." + g_config.hdr_output + ".hdr.disable"});
+}
+
+static void restore_hdr_after_monitor() {
+    // Restore the state observed before the session, independently of whether
+    // this session requested HDR.  This also covers a desktop where HDR was
+    // already enabled before a monitor-only gaming preset was applied.
+    if (saved_hdr_was_enabled()) {
         exec_argv("kscreen-doctor",
-                  {"output." + g_config.hdr_output + ".hdr.disable"});
-    // if it was enabled, leave it enabled
+                  {"output." + g_config.hdr_output + ".hdr.enable"});
+    }
 }
 
 // ── monitor DDC/CI ────────────────────────────────────────────────────────
 
 static void save_monitor_state(const std::string &dir) {
-    if (!monitor_enabled()) return;
+    if (!monitor_enabled()) { std::cerr << "game-session: MONITOR NOT ENABLED\n"; return; }
     auto bus = monitor_find_bus();
     if (bus.empty()) { std::cerr << "game-session: monitor not found, skipping\n"; return; }
+    std::cerr << "game-session: save: found bus=" << bus << "\n";
     auto d = dir + "/monitor";
     mkdir(d.c_str(), 0755);
     write_file(d + "/bus", bus);
-    write_file(d + "/picture_mode",     monitor_read_vcp(bus, "15"));
+    std::string pm = monitor_read_vcp(bus, "15");
+    std::cerr << "game-session: save: picture_mode=" << pm << "\n";
+    write_file(d + "/picture_mode",     pm);
     write_file(d + "/response_time",    monitor_read_vcp(bus, "F7"));
     write_file(d + "/black_stabilizer", monitor_read_vcp(bus, "F9"));
     write_file(d + "/color_preset",     monitor_read_vcp(bus, "14"));
 }
 
 static void apply_monitor() {
-    if (g_config.monitor_preset.empty()) return;
+    if (g_config.monitor_preset.empty()) { std::cerr << "game-session: apply: preset empty\n"; return; }
     auto bus = read_file_trim(state_dir + "/monitor/bus");
-    if (bus.empty()) return;
+    if (bus.empty()) { std::cerr << "game-session: apply: bus empty\n"; return; }
     auto p = get_preset(g_config.monitor_preset);
+    std::cerr << "game-session: apply: bus=" << bus << " preset=" << g_config.monitor_preset
+              << " 15=" << p.dec << " F7=" << p.rt << " F9=" << p.bs << " 14=" << p.color << "\n";
     monitor_write_vcp(bus, "15", p.dec);
     monitor_write_vcp(bus, "F7", p.rt);
     monitor_write_vcp(bus, "F9", p.bs);
@@ -614,8 +624,15 @@ static void apply_monitor() {
 static void restore_monitor() {
     auto d = state_dir + "/monitor";
     auto bus = read_file_trim(d + "/bus");
-    if (bus.empty()) return;
+    if (bus.empty()) { std::cerr << "game-session: restore: bus empty\n"; return; }
     std::string v;
+    v = read_file_trim(d + "/picture_mode");
+    std::cerr << "game-session: restore: bus=" << bus << " 15=" << v;
+    v = read_file_trim(d + "/response_time");    std::cerr << " F7=" << v;
+    v = read_file_trim(d + "/black_stabilizer"); std::cerr << " F9=" << v;
+    v = read_file_trim(d + "/color_preset");     std::cerr << " 14=" << v;
+    std::cerr << "\n";
+
     v = read_file_trim(d + "/picture_mode");     if (!v.empty()) monitor_write_vcp(bus, "15", v);
     v = read_file_trim(d + "/response_time");    if (!v.empty()) monitor_write_vcp(bus, "F7", v);
     v = read_file_trim(d + "/black_stabilizer"); if (!v.empty()) monitor_write_vcp(bus, "F9", v);
@@ -636,7 +653,7 @@ static int interpolate_pwm(int temp, const std::vector<FanPoint> &curve, int fan
             auto &lo = curve[i-1];
             auto &hi = curve[i];
             double t = double(temp - lo.temp) / double(hi.temp - lo.temp);
-            return (int)std::round(lo.pwm + t * (hi.pwm - lo.pwm));
+            return std::clamp(static_cast<int>(std::round(lo.pwm + t * (hi.pwm - lo.pwm))), 0, 255);
         }
     }
     return curve.back().pwm;
@@ -645,7 +662,7 @@ static int interpolate_pwm(int temp, const std::vector<FanPoint> &curve, int fan
 static void fan_loop(std::atomic<bool> &running, const Config &cfg) {
     if (hwmon_path.empty() || !cfg.fan_enabled) return;
 
-    helper_write("fan-enable", "1");
+    if (!helper_write("fan-enable", "1")) return;
 
     std::vector<FanPoint> curve;
     for (auto &p : cfg.fan_curve) curve.push_back({p.first, p.second});
@@ -669,31 +686,25 @@ static void fan_loop(std::atomic<bool> &running, const Config &cfg) {
             pwm = last_pwm;
         }
 
-        if (pwm != last_pwm && pwm > 0) {
-            helper_write("fan-pwm", std::to_string(pwm));
+        if (pwm != last_pwm) {
+            if (!helper_write("fan-pwm", std::to_string(pwm))) break;
             last_pwm = pwm;
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(cfg.fan_interval_ms));
     }
 
-    helper_write("fan-enable", "2");
 }
 
 // ── restore / cleanup ──────────────────────────────────────────────────────
 
-static void restore_fan() {
-    auto d = state_dir + "/gpu";
-    auto v = read_file_trim(d + "/pwm1_enable");
-    if (!v.empty())
-        helper_write("fan-enable", v);
-}
-
 static void cleanup() {
+    // Some monitor picture modes cannot be selected while HDR is enabled.
+    // Restore DDC/CI state with HDR disabled, then restore the original HDR state.
+    disable_hdr_for_monitor_restore();
     restore_monitor();
-    restore_hdr();
-    restore_gpu();
-    restore_fan();
+    restore_hdr_after_monitor();
+    restore_gpu_defaults();
     if (!state_dir.empty()) {
         std::error_code ec;
         fs::remove_all(state_dir, ec);
@@ -703,7 +714,6 @@ static void cleanup() {
 // ── signal ──────────────────────────────────────────────────────────────────
 
 static void handle_signal(int sig) {
-    g_shutdown = 1;
     pid_t pid = g_child_pid;
     if (pid > 0) kill(pid, sig);
 }
@@ -815,7 +825,7 @@ int main(int argc, char *argv[]) {
     }
 
     hwmon_path = find_hwmon();
-    load_config();
+    if (!load_config()) return 1;
     apply_default_env();
 
     if (std::string(argv[1]) == "dump") {
@@ -831,10 +841,13 @@ int main(int argc, char *argv[]) {
     }
     state_dir = buf;
 
-    save_gpu_state(state_dir);
     save_monitor_state(state_dir);
     save_hdr_state(state_dir);
-    apply_gpu();
+    if (!apply_gpu()) {
+        std::cerr << "failed to apply GPU profile; restoring saved state\n";
+        cleanup();
+        return 1;
+    }
     apply_monitor();
     apply_hdr();
 

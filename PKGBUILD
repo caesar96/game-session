@@ -6,10 +6,9 @@ pkgdesc="AMD GPU overclock, fan curve, monitor HDR/presets and CPU optimizations
 arch=('x86_64')
 url="https://github.com/caesar96/game-session"
 license=('MIT')
-depends=('glibc' 'gcc-libs' 'libkscreen')
+depends=('glibc' 'gcc-libs' 'libkscreen' 'game-performance')
 makedepends=('cmake' 'gcc')
 optdepends=(
-    'game-performance: CPU governor and sleep inhibit (CachyOS)'
     'ddcutil: DDC/CI monitor preset switching'
 )
 provides=('game-session')
