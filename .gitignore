@@ -1,4 +1,5 @@
 *.o
 *.out
 build/
+build-*/
 *.pkg.tar.zst

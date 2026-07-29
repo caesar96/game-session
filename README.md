@@ -42,7 +42,7 @@ game-session %command%
 
 - Linux with an **AMD GPU** (RDNA 1/2, legacy GCN/Vega)
 - `g++` (GCC 12+), `cmake`, `make` (build only)
-- `game-performance` (CachyOS — `powerprofilesctl` + `systemd-inhibit`)
+- `cachyos-settings` (provides CachyOS's `game-performance` wrapper)
 - `ddcutil` — optional, needed only for monitor presets
 - `sudo` — required for the privileged helper
 
@@ -194,8 +194,9 @@ game-session ./mygame
   ├─ load_config()            ← config file
   ├─ apply_default_env()      ← Proton / MangoHud defaults
   │
-  ├─ save_monitor_state()     ← ddcutil getvcp
   ├─ save_hdr_state()         ← remembers the HDR state before the session
+  ├─ disable HDR temporarily  ← waits until DDC/CI is available
+  ├─ save_monitor_state()     ← ddcutil getvcp
   │
   ├─ apply_gpu()
   │   └─ profile              ← sudo helper profile 1
@@ -204,14 +205,14 @@ game-session ./mygame
   │   └─ force-level          ← sudo helper force-level high    ← LAST
   │
   ├─ apply_monitor()          ← ddcutil setvcp
-  ├─ apply_hdr()              ← kscreen-doctor output.DP-1.hdr.enable
+  ├─ apply/restore HDR        ← game setting or original desktop state
   ├─ start fan thread
   │
   ├─ fork + exec game-performance ./mygame
   ├─ waitpid
   │
   ├─ stop fan thread
-  ├─ disable HDR temporarily  ← lets DDC/CI presets apply reliably
+  ├─ disable HDR temporarily  ← waits until DDC/CI is available
   ├─ restore_monitor()
   ├─ restore_hdr()            ← restores the HDR state from before the session
   ├─ restore_gpu_defaults()   ← od-reset, then auto/profile 0/default cap/fan auto

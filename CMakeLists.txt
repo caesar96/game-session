@@ -14,6 +14,13 @@ add_executable(game-session-helper game-session-helper.cpp amdgpu_overdrive.cpp)
 find_package(Threads REQUIRED)
 target_link_libraries(game-session PRIVATE Threads::Threads)
 
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(game-session-tests tests/game_session_tests.cpp amdgpu_overdrive.cpp)
+    target_link_libraries(game-session-tests PRIVATE Threads::Threads)
+    add_test(NAME game-session-tests COMMAND game-session-tests)
+endif()
+
 install(TARGETS game-session game-session-helper
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 

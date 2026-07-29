@@ -27,6 +27,7 @@
 
 static std::string state_dir;
 static volatile sig_atomic_t g_child_pid = 0;
+static volatile sig_atomic_t g_shutdown_signal = 0;
 static std::string hwmon_path;
 
 // ── util ────────────────────────────────────────────────────────────────────
@@ -88,8 +89,10 @@ static std::string exec_capture_argv(const std::string &cmd,
         result.append(buf, n);
     close(pipefd[0]);
 
-    int status;
-    waitpid(pid, &status, 0);
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) return {};
+    }
     return result;
 }
 
@@ -109,8 +112,10 @@ static bool exec_argv(const std::string &cmd,
         _exit(127);
     }
 
-    int status;
-    waitpid(pid, &status, 0);
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) return false;
+    }
     return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
@@ -452,39 +457,59 @@ static std::string monitor_find_bus() {
 }
 
 static std::string monitor_read_vcp(const std::string &bus, const std::string &vcp) {
-    auto out = exec_capture_argv("ddcutil",
-        {"--permit-unknown-feature", "--bus", bus, "getvcp", vcp});
-    auto sl = out.find("sl=");
-    if (sl != std::string::npos) {
-        auto val = out.substr(sl + 3);
-        std::string hex;
-        for (char c : val) {
-            if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
-                (c >= 'A' && c <= 'F') || c == 'x') hex += c;
-            else break;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        auto out = exec_capture_argv("ddcutil",
+            {"--permit-unknown-feature", "--bus", bus, "getvcp", vcp});
+        auto sl = out.find("sl=");
+        if (sl != std::string::npos) {
+            auto val = out.substr(sl + 3);
+            std::string hex;
+            for (char c : val) {
+                if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+                    (c >= 'A' && c <= 'F') || c == 'x') hex += c;
+                else break;
+            }
+            if (!hex.empty()) return hex;
         }
-        return hex;
+        auto cv = out.find("current value = ");
+        if (cv != std::string::npos) {
+            auto val = out.substr(cv + 16);
+            // ddcutil prints decimal or hexadecimal values followed by punctuation.
+            size_t end = 0;
+            while (end < val.size() &&
+                   (std::isdigit(static_cast<unsigned char>(val[end])) ||
+                    (val[end] >= 'a' && val[end] <= 'f') ||
+                    (val[end] >= 'A' && val[end] <= 'F') ||
+                    val[end] == 'x' || val[end] == 'X')) ++end;
+            if (end > 0) return val.substr(0, end);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }
-    auto cv = out.find("current value = ");
-    if (cv != std::string::npos) {
-        auto val = out.substr(cv + 16);
-        // ddcutil prints decimal or hexadecimal values followed by punctuation
-        // (for example: "current value = 0x01, maximum value = ...").
-        size_t end = 0;
-        while (end < val.size() &&
-               (std::isdigit(static_cast<unsigned char>(val[end])) ||
-                (val[end] >= 'a' && val[end] <= 'f') ||
-                (val[end] >= 'A' && val[end] <= 'F') ||
-                val[end] == 'x' || val[end] == 'X')) ++end;
-        return val.substr(0, end);
-    }
+    std::cerr << "game-session: failed to read monitor VCP " << vcp << "\n";
     return {};
 }
 
-static void monitor_write_vcp(const std::string &bus, const std::string &vcp,
-                               const std::string &val) {
-    exec_argv("ddcutil",
-        {"--permit-unknown-feature", "--bus", bus, "setvcp", vcp, val});
+static bool monitor_write_vcp(const std::string &bus, const std::string &vcp,
+                              const std::string &val) {
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        if (exec_argv("ddcutil",
+                {"--noverify", "--permit-unknown-feature", "--bus", bus,
+                 "setvcp", vcp, val}))
+            return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    }
+    std::cerr << "game-session: failed to set monitor VCP " << vcp << "=" << val << "\n";
+    return false;
+}
+
+static bool monitor_vcp_equal(const std::string &actual, const std::string &wanted) {
+    char *actual_end = nullptr;
+    char *wanted_end = nullptr;
+    const auto actual_value = std::strtol(actual.c_str(), &actual_end, 0);
+    const auto wanted_value = std::strtol(wanted.c_str(), &wanted_end, 0);
+    return actual_end != actual.c_str() && *actual_end == '\0' &&
+           wanted_end != wanted.c_str() && *wanted_end == '\0' &&
+           actual_value == wanted_value;
 }
 
 struct Preset {
@@ -522,109 +547,147 @@ static std::string strip_ansi(const std::string &s) {
     return out;
 }
 
-static std::string hdr_current_state(const std::string &output) {
-    auto raw = exec_capture_argv("kscreen-doctor", {"-o"});
-    auto out = strip_ansi(raw);
-    // locate the output section and read HDR line
-    auto pos = out.find("Output: ");
-    while (pos != std::string::npos) {
-        auto nl = out.find('\n', pos);
-        if (nl == std::string::npos) break;
-        auto line = out.substr(pos, nl - pos);
-        if (line.find(output) != std::string::npos) {
-            auto section_end = out.find("Output: ", nl + 1);
-            auto sec = (section_end == std::string::npos)
-                ? out.substr(nl + 1)
-                : out.substr(nl + 1, section_end - nl - 1);
-            auto hpos = sec.find("\n\tHDR: ");
-            if (hpos != std::string::npos) {
-                auto val_start = hpos + 7;
-                auto val_end = sec.find('\n', val_start);
-                return trim(sec.substr(val_start, val_end - val_start));
-            }
+enum class HdrState { unknown, disabled, enabled };
+
+static HdrState parse_hdr_state(const std::string &raw, const std::string &output) {
+    std::istringstream lines(strip_ansi(raw));
+    std::string line;
+    bool matching_output = false;
+
+    while (std::getline(lines, line)) {
+        auto value = trim(line);
+        if (value.rfind("Output:", 0) == 0) {
+            std::istringstream header(value);
+            std::string label, id, name;
+            header >> label >> id >> name;
+            matching_output = (name == output);
+            continue;
         }
-        pos = out.find("Output: ", nl + 1);
+        if (!matching_output || value.rfind("HDR:", 0) != 0) continue;
+
+        value = trim(value.substr(4));
+        std::transform(value.begin(), value.end(), value.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+        if (value == "enabled") return HdrState::enabled;
+        if (value == "disabled" || value == "incapable") return HdrState::disabled;
+        return HdrState::unknown;
     }
-    return {};
+    return HdrState::unknown;
 }
 
-static void save_hdr_state(const std::string &dir) {
+static HdrState hdr_current_state(const std::string &output) {
+    return parse_hdr_state(exec_capture_argv("kscreen-doctor", {"-o"}), output);
+}
+
+static const char *hdr_state_name(HdrState state) {
+    switch (state) {
+        case HdrState::disabled: return "disabled";
+        case HdrState::enabled: return "enabled";
+        default: return "unknown";
+    }
+}
+
+static HdrState saved_hdr_state() {
+    auto state = read_file_trim(state_dir + "/monitor/hdr_state");
+    std::transform(state.begin(), state.end(), state.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+    if (state == "enabled") return HdrState::enabled;
+    if (state == "disabled") return HdrState::disabled;
+    return HdrState::unknown;
+}
+
+static bool set_hdr_state(HdrState wanted) {
+    if (wanted == HdrState::unknown) return false;
+    auto current = hdr_current_state(g_config.hdr_output);
+    if (current == wanted) return true;
+
+    const auto action = wanted == HdrState::enabled ? "enable" : "disable";
+    if (!exec_argv("kscreen-doctor",
+                   {"output." + g_config.hdr_output + ".hdr." + action})) {
+        std::cerr << "game-session: failed to " << action << " HDR on "
+                  << g_config.hdr_output << "\n";
+        return false;
+    }
+
+    for (int attempt = 0; attempt < 30; ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (hdr_current_state(g_config.hdr_output) == wanted) {
+            // The compositor state changes before some monitors accept DDC/CI again.
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+            return true;
+        }
+    }
+    std::cerr << "game-session: timed out waiting for HDR to become "
+              << hdr_state_name(wanted) << " on " << g_config.hdr_output << "\n";
+    return false;
+}
+
+static bool save_hdr_state(const std::string &dir) {
     // A monitor preset may need HDR disabled during restoration even when this
     // session did not enable HDR itself.  Save the pre-session state whenever
     // either feature is in use so cleanup can restore the picture mode first.
-    if (!g_config.hdr && !monitor_enabled()) return;
+    if (!g_config.hdr && !monitor_enabled()) return true;
     auto d = dir + "/monitor";
     mkdir(d.c_str(), 0755);
     auto state = hdr_current_state(g_config.hdr_output);
-    if (!state.empty())
-        write_file(d + "/hdr_state", state);
-}
-
-static void apply_hdr() {
-    if (!g_config.hdr) return;
-    exec_argv("kscreen-doctor",
-              {"output." + g_config.hdr_output + ".hdr.enable"});
-}
-
-static bool saved_hdr_was_enabled() {
-    auto d = state_dir + "/monitor";
-    auto state = read_file_trim(d + "/hdr_state");
-    std::transform(state.begin(), state.end(), state.begin(),
-                   [](unsigned char c) { return std::tolower(c); });
-    return state == "enabled";
-}
-
-static void disable_hdr_for_monitor_restore() {
-    if (read_file_trim(state_dir + "/monitor/hdr_state").empty()) return;
-    exec_argv("kscreen-doctor",
-              {"output." + g_config.hdr_output + ".hdr.disable"});
-}
-
-static void restore_hdr_after_monitor() {
-    // Restore the state observed before the session, independently of whether
-    // this session requested HDR.  This also covers a desktop where HDR was
-    // already enabled before a monitor-only gaming preset was applied.
-    if (saved_hdr_was_enabled()) {
-        exec_argv("kscreen-doctor",
-                  {"output." + g_config.hdr_output + ".hdr.enable"});
+    if (state == HdrState::unknown) {
+        std::cerr << "game-session: could not read HDR state for "
+                  << g_config.hdr_output << "; display settings were not changed\n";
+        return false;
     }
+    return write_file(d + "/hdr_state", hdr_state_name(state));
 }
 
 // ── monitor DDC/CI ────────────────────────────────────────────────────────
 
-static void save_monitor_state(const std::string &dir) {
-    if (!monitor_enabled()) { std::cerr << "game-session: MONITOR NOT ENABLED\n"; return; }
+static bool save_monitor_state(const std::string &dir) {
+    if (!monitor_enabled()) return true;
     auto bus = monitor_find_bus();
-    if (bus.empty()) { std::cerr << "game-session: monitor not found, skipping\n"; return; }
+    if (bus.empty()) { std::cerr << "game-session: monitor not found\n"; return false; }
     std::cerr << "game-session: save: found bus=" << bus << "\n";
+    const auto pm = monitor_read_vcp(bus, "15");
+    if (g_shutdown_signal) return false;
+    const auto rt = monitor_read_vcp(bus, "F7");
+    if (g_shutdown_signal) return false;
+    const auto bs = monitor_read_vcp(bus, "F9");
+    if (g_shutdown_signal) return false;
+    const auto color = monitor_read_vcp(bus, "14");
+    std::cerr << "game-session: save: picture_mode=" << pm << "\n";
+    if (pm.empty() || rt.empty() || bs.empty() || color.empty()) {
+        std::cerr << "game-session: monitor state is incomplete; preset was not changed\n";
+        return false;
+    }
+
     auto d = dir + "/monitor";
     mkdir(d.c_str(), 0755);
-    write_file(d + "/bus", bus);
-    std::string pm = monitor_read_vcp(bus, "15");
-    std::cerr << "game-session: save: picture_mode=" << pm << "\n";
-    write_file(d + "/picture_mode",     pm);
-    write_file(d + "/response_time",    monitor_read_vcp(bus, "F7"));
-    write_file(d + "/black_stabilizer", monitor_read_vcp(bus, "F9"));
-    write_file(d + "/color_preset",     monitor_read_vcp(bus, "14"));
+    const bool saved =
+        write_file(d + "/picture_mode", pm) &&
+        write_file(d + "/response_time", rt) &&
+        write_file(d + "/black_stabilizer", bs) &&
+        write_file(d + "/color_preset", color) &&
+        write_file(d + "/bus", bus);
+    if (!saved) std::cerr << "game-session: failed to save monitor state\n";
+    return saved;
 }
 
-static void apply_monitor() {
-    if (g_config.monitor_preset.empty()) { std::cerr << "game-session: apply: preset empty\n"; return; }
+static bool apply_monitor() {
+    if (g_config.monitor_preset.empty()) return true;
     auto bus = read_file_trim(state_dir + "/monitor/bus");
-    if (bus.empty()) { std::cerr << "game-session: apply: bus empty\n"; return; }
+    if (bus.empty()) { std::cerr << "game-session: apply: bus empty\n"; return false; }
     auto p = get_preset(g_config.monitor_preset);
     std::cerr << "game-session: apply: bus=" << bus << " preset=" << g_config.monitor_preset
               << " 15=" << p.dec << " F7=" << p.rt << " F9=" << p.bs << " 14=" << p.color << "\n";
-    monitor_write_vcp(bus, "15", p.dec);
-    monitor_write_vcp(bus, "F7", p.rt);
-    monitor_write_vcp(bus, "F9", p.bs);
-    monitor_write_vcp(bus, "14", p.color);
+    bool ok = monitor_write_vcp(bus, "15", p.dec);
+    ok = monitor_write_vcp(bus, "F7", p.rt) && ok;
+    ok = monitor_write_vcp(bus, "F9", p.bs) && ok;
+    ok = monitor_write_vcp(bus, "14", p.color) && ok;
+    return ok;
 }
 
-static void restore_monitor() {
+static bool restore_monitor() {
     auto d = state_dir + "/monitor";
     auto bus = read_file_trim(d + "/bus");
-    if (bus.empty()) { std::cerr << "game-session: restore: bus empty\n"; return; }
+    if (bus.empty()) return true;
     std::string v;
     v = read_file_trim(d + "/picture_mode");
     std::cerr << "game-session: restore: bus=" << bus << " 15=" << v;
@@ -633,10 +696,41 @@ static void restore_monitor() {
     v = read_file_trim(d + "/color_preset");     std::cerr << " 14=" << v;
     std::cerr << "\n";
 
-    v = read_file_trim(d + "/picture_mode");     if (!v.empty()) monitor_write_vcp(bus, "15", v);
-    v = read_file_trim(d + "/response_time");    if (!v.empty()) monitor_write_vcp(bus, "F7", v);
-    v = read_file_trim(d + "/black_stabilizer"); if (!v.empty()) monitor_write_vcp(bus, "F9", v);
-    v = read_file_trim(d + "/color_preset");     if (!v.empty()) monitor_write_vcp(bus, "14", v);
+    const auto picture_mode = read_file_trim(d + "/picture_mode");
+    const auto response_time = read_file_trim(d + "/response_time");
+    const auto black_stabilizer = read_file_trim(d + "/black_stabilizer");
+    const auto color_preset = read_file_trim(d + "/color_preset");
+
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        if (!picture_mode.empty()) monitor_write_vcp(bus, "15", picture_mode);
+        if (!response_time.empty()) monitor_write_vcp(bus, "F7", response_time);
+        if (!black_stabilizer.empty()) monitor_write_vcp(bus, "F9", black_stabilizer);
+        if (!color_preset.empty()) monitor_write_vcp(bus, "14", color_preset);
+
+        // HDR transitions can acknowledge before the monitor finishes changing
+        // modes. Verify after it settles and repeat if that transition won.
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        const bool restored =
+            monitor_vcp_equal(monitor_read_vcp(bus, "15"), picture_mode) &&
+            monitor_vcp_equal(monitor_read_vcp(bus, "F7"), response_time) &&
+            monitor_vcp_equal(monitor_read_vcp(bus, "F9"), black_stabilizer) &&
+            monitor_vcp_equal(monitor_read_vcp(bus, "14"), color_preset);
+        if (restored) return true;
+        std::cerr << "game-session: monitor restore verification failed; retrying\n";
+    }
+    return false;
+}
+
+static bool apply_display_settings() {
+    const auto original_hdr = saved_hdr_state();
+    const bool has_monitor_state =
+        !read_file_trim(state_dir + "/monitor/bus").empty();
+
+    if (has_monitor_state && !set_hdr_state(HdrState::disabled)) return false;
+    if (!apply_monitor()) return false;
+
+    const auto game_hdr = g_config.hdr ? HdrState::enabled : original_hdr;
+    return game_hdr == HdrState::unknown || set_hdr_state(game_hdr);
 }
 
 // ── fan controller ─────────────────────────────────────────────────────────
@@ -698,22 +792,38 @@ static void fan_loop(std::atomic<bool> &running, const Config &cfg) {
 
 // ── restore / cleanup ──────────────────────────────────────────────────────
 
-static void cleanup() {
-    // Some monitor picture modes cannot be selected while HDR is enabled.
-    // Restore DDC/CI state with HDR disabled, then restore the original HDR state.
-    disable_hdr_for_monitor_restore();
-    restore_monitor();
-    restore_hdr_after_monitor();
+static bool cleanup() {
+    const auto original_hdr = saved_hdr_state();
+    const bool has_monitor_state =
+        !read_file_trim(state_dir + "/monitor/bus").empty();
+
+    // GPU resets can retrain the display link, so finish them before restoring
+    // the monitor. Otherwise the link transition may undo the final VCP write.
     restore_gpu_defaults();
-    if (!state_dir.empty()) {
+
+    // Some monitor picture modes cannot be selected while HDR is enabled.
+    // Wait for HDR to be disabled, restore DDC/CI, then restore the exact state.
+    const bool hdr_disabled =
+        !has_monitor_state || set_hdr_state(HdrState::disabled);
+    const bool monitor_restored = hdr_disabled && restore_monitor();
+    const bool hdr_restored = original_hdr == HdrState::unknown ||
+        set_hdr_state(original_hdr);
+
+    const bool display_restored = monitor_restored && hdr_restored;
+    if (display_restored && !state_dir.empty()) {
         std::error_code ec;
         fs::remove_all(state_dir, ec);
+    } else if (!display_restored) {
+        std::cerr << "game-session: display restoration failed; recovery state kept at "
+                  << state_dir << "\n";
     }
+    return display_restored;
 }
 
 // ── signal ──────────────────────────────────────────────────────────────────
 
 static void handle_signal(int sig) {
+    g_shutdown_signal = sig;
     pid_t pid = g_child_pid;
     if (pid > 0) kill(pid, sig);
 }
@@ -841,37 +951,87 @@ int main(int argc, char *argv[]) {
     }
     state_dir = buf;
 
-    save_monitor_state(state_dir);
-    save_hdr_state(state_dir);
+    signal(SIGINT,  handle_signal);
+    signal(SIGTERM, handle_signal);
+    signal(SIGQUIT, handle_signal);
+
+    if (!save_hdr_state(state_dir)) {
+        std::error_code ec;
+        fs::remove_all(state_dir, ec);
+        return 1;
+    }
+    if (g_shutdown_signal) {
+        std::error_code ec;
+        fs::remove_all(state_dir, ec);
+        return 128 + g_shutdown_signal;
+    }
+    const auto original_hdr = saved_hdr_state();
+    if (monitor_enabled() && !set_hdr_state(HdrState::disabled)) {
+        cleanup();
+        return 1;
+    }
+    if (g_shutdown_signal || !save_monitor_state(state_dir)) {
+        const bool hdr_restored = original_hdr == HdrState::unknown ||
+            set_hdr_state(original_hdr);
+        if (hdr_restored) {
+            std::error_code ec;
+            fs::remove_all(state_dir, ec);
+        } else {
+            std::cerr << "game-session: HDR restoration failed; recovery state kept at "
+                      << state_dir << "\n";
+        }
+        return g_shutdown_signal ? 128 + g_shutdown_signal : 1;
+    }
     if (!apply_gpu()) {
         std::cerr << "failed to apply GPU profile; restoring saved state\n";
         cleanup();
         return 1;
     }
-    apply_monitor();
-    apply_hdr();
+    const bool display_applied = !g_shutdown_signal && apply_display_settings();
+    if (g_shutdown_signal || !display_applied) {
+        std::cerr << "failed to apply display settings; restoring saved state\n";
+        cleanup();
+        return g_shutdown_signal ? 128 + g_shutdown_signal : 1;
+    }
 
     std::vector<const char *> cmd_vec = {"game-performance"};
     for (int i = 1; i < argc; i++) cmd_vec.push_back(argv[i]);
     cmd_vec.push_back(nullptr);
 
+    sigset_t blocked_signals, previous_mask;
+    sigemptyset(&blocked_signals);
+    sigaddset(&blocked_signals, SIGINT);
+    sigaddset(&blocked_signals, SIGTERM);
+    sigaddset(&blocked_signals, SIGQUIT);
+    if (sigprocmask(SIG_BLOCK, &blocked_signals, &previous_mask) < 0) {
+        std::cerr << "failed to block signals before fork: " << strerror(errno) << "\n";
+        cleanup();
+        return 1;
+    }
+    if (g_shutdown_signal) {
+        sigprocmask(SIG_SETMASK, &previous_mask, nullptr);
+        cleanup();
+        return 128 + g_shutdown_signal;
+    }
+
     g_child_pid = fork();
     if (g_child_pid < 0) {
+        sigprocmask(SIG_SETMASK, &previous_mask, nullptr);
         std::cerr << "fork failed\n";
         cleanup();
         return 1;
     }
 
     if (g_child_pid == 0) {
+        signal(SIGINT, SIG_DFL);
+        signal(SIGTERM, SIG_DFL);
+        signal(SIGQUIT, SIG_DFL);
+        sigprocmask(SIG_SETMASK, &previous_mask, nullptr);
         execvp("game-performance", const_cast<char *const *>(cmd_vec.data()));
         std::cerr << "failed to execute game-performance: " << strerror(errno) << "\n";
         _exit(127);
     }
-
-    // Install signal handlers only after fork so g_child_pid is always valid
-    signal(SIGINT,  handle_signal);
-    signal(SIGTERM, handle_signal);
-    signal(SIGQUIT, handle_signal);
+    sigprocmask(SIG_SETMASK, &previous_mask, nullptr);
 
     std::atomic<bool> fan_running{true};
     std::thread fan_thread;
@@ -886,6 +1046,6 @@ int main(int argc, char *argv[]) {
     fan_running = false;
     if (fan_thread.joinable()) fan_thread.join();
 
-    cleanup();
+    if (!cleanup()) return 1;
     return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
 }
