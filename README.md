@@ -7,7 +7,7 @@ when you're done. It sits in Steam's launch options and chains into CachyOS's
 
 ```
 game-session %command%
-   ├── save monitor + HDR state (DDC/CI / kscreen-doctor)
+   ├── save monitor + HDR + VRR state (DDC/CI / kscreen-doctor)
    ├── apply gaming profile:
    │   ├── GPU: power profile, power cap, overclock (OD), force level
    │   ├── monitor: picture mode, response time, black stabiliser, colour
@@ -23,6 +23,8 @@ game-session %command%
 - **Monitor DDC/CI** — switches to a gaming picture preset (FPS, RTS, …) and
   restores the original values afterwards. HDR is temporarily disabled before
   restore when necessary, then returned to its pre-session state.
+- **Adaptive sync** — switches VRR to `Automatic` while the game runs and
+  restores the previous `Never`, `Always` or `Automatic` policy afterwards.
 - **Custom fan curve** — temperature‑based PWM interpolation with hysteresis
   and an emergency thermal throttle override.
 - **Flicker‑free** — OD changes are applied in `auto` mode, then locked with
@@ -96,7 +98,8 @@ game-session dump     # diagnostic — no side effects
 | `GS_MONITOR_PRESET` | — | Monitor picture preset: `FPS`, `RTS`, `Gamer 1`, `Gamer 2`, `Vivid`, `Reader`, `HDR Effect`. `MONITOR_PRESET` remains supported as an alias. |
 | `MONITOR_MATCH` | `GSM` | String to match in `ddcutil detect --brief` output |
 | `GS_HDR` | `false` | Enable HDR via kscreen-doctor (`true` / `1` = enable, `0` = skip) |
-| `GS_HDR_OUTPUT` | `DP-1` | Display output name for HDR (e.g. `DP-1`, `HDMI-A-1`) |
+| `GS_VRR` | `false` | Use automatic VRR during the session and restore the previous policy afterwards |
+| `GS_HDR_OUTPUT` | `DP-1` | Display output name for HDR and VRR (e.g. `DP-1`, `HDMI-A-1`) |
 | `GS_HELPER` | auto‑detected | Override path to `game-session-helper` binary |
 
 ### Config file
@@ -116,6 +119,7 @@ voltage_offset = -5
 [monitor]
 preset = RTS
 hdr = false
+vrr = false
 hdr_output = DP-1
 
 [fan]
@@ -195,6 +199,7 @@ game-session ./mygame
   ├─ apply_default_env()      ← Proton / MangoHud defaults
   │
   ├─ save_hdr_state()         ← remembers the HDR state before the session
+  ├─ save_vrr_policy()        ← remembers Never / Always / Automatic
   ├─ disable HDR temporarily  ← waits until DDC/CI is available
   ├─ save_monitor_state()     ← ddcutil getvcp
   │
@@ -205,6 +210,7 @@ game-session ./mygame
   │   └─ force-level          ← sudo helper force-level high    ← LAST
   │
   ├─ apply_monitor()          ← ddcutil setvcp
+  ├─ apply VRR Automatic      ← only while the game is running
   ├─ apply/restore HDR        ← game setting or original desktop state
   ├─ start fan thread
   │
@@ -215,6 +221,7 @@ game-session ./mygame
   ├─ disable HDR temporarily  ← waits until DDC/CI is available
   ├─ restore_monitor()
   ├─ restore_hdr()            ← restores the HDR state from before the session
+  ├─ restore VRR              ← restores the previous adaptive sync policy
   ├─ restore_gpu_defaults()   ← od-reset, then auto/profile 0/default cap/fan auto
   └─ rm -rf /tmp/game-session-XXXXX
 ```

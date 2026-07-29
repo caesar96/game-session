@@ -1,8 +1,8 @@
 # Maintainer: devd <devd@archlinux>
 pkgname=game-session
 pkgver=1.0
-pkgrel=5
-pkgdesc="AMD GPU overclock, fan curve, monitor HDR/presets and CPU optimizations for gaming"
+pkgrel=6
+pkgdesc="AMD GPU overclock, fan curve, monitor HDR/VRR/presets and CPU optimizations for gaming"
 arch=('x86_64')
 url="https://github.com/caesar96/game-session"
 license=('MIT')

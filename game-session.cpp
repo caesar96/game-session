@@ -157,6 +157,7 @@ struct Config {
     std::string voltage_offset;
     std::string monitor_preset;
     bool hdr = false;
+    bool vrr = false;
     std::string hdr_output = "DP-1";
     bool fan_enabled = false;
     int fan_start = 50;
@@ -200,6 +201,7 @@ static void parse_env_config(Config &cfg) {
     if (auto v = env_or("GS_MONITOR_PRESET", ""); !v.empty()) cfg.monitor_preset = v;
     else if (auto v = env_or("MONITOR_PRESET", ""); !v.empty()) cfg.monitor_preset = v;
     if (auto v = env_or("GS_HDR", ""); !v.empty()) cfg.hdr = (v == "true" || v == "1");
+    if (auto v = env_or("GS_VRR", ""); !v.empty()) cfg.vrr = (v == "true" || v == "1");
     if (auto v = env_or("GS_HDR_OUTPUT", ""); !v.empty()) cfg.hdr_output = v;
 }
 
@@ -237,6 +239,7 @@ static void parse_config_file(Config &cfg, const std::string &path) {
         else if (skey == "fan.emergency_temp" || key == "GS_FAN_EMERGENCY_TEMP") cfg.fan_emergency_temp = safe_stoi(val, 85);
         else if (skey == "monitor.preset" || key == "MONITOR_PRESET") cfg.monitor_preset = val;
         else if (skey == "monitor.hdr" || key == "GS_HDR") cfg.hdr = (val == "true" || val == "1");
+        else if (skey == "monitor.vrr" || key == "GS_VRR") cfg.vrr = (val == "true" || val == "1");
         else if (skey == "monitor.hdr_output" || key == "GS_HDR_OUTPUT") cfg.hdr_output = val;
         else if (skey == "fan.curve" || key == "GS_FAN_CURVE") {
             cfg.fan_curve = parse_fan_curve(val);
@@ -284,7 +287,8 @@ static void ensure_config() {
          "# preset          = monitor picture mode: FPS, RTS, Gamer 1, Gamer 2, Vivid, Reader, HDR Effect\n"
          "#                   (requires ddcutil and a compatible monitor)\n"
          "# hdr             = true | false — enable HDR via kscreen-doctor\n"
-         "# hdr_output      = DP-1 (or HDMI-A-1, etc.) — output name for HDR\n"
+         "# vrr             = true | false — use automatic VRR during the session\n"
+         "# hdr_output      = DP-1 (or HDMI-A-1, etc.) — output name for HDR and VRR\n"
          "\n"
          "[gpu]\n"
          "force_level = high\n"
@@ -306,6 +310,7 @@ static void ensure_config() {
          "[monitor]\n"
          "# preset = Reader\n"
          "hdr = false\n"
+         "vrr = false\n"
          "hdr_output = DP-1\n";
 }
 
@@ -638,6 +643,92 @@ static bool save_hdr_state(const std::string &dir) {
     return write_file(d + "/hdr_state", hdr_state_name(state));
 }
 
+enum class VrrPolicy { unknown, never, always, automatic };
+
+static VrrPolicy parse_vrr_policy(const std::string &raw, const std::string &output) {
+    std::istringstream lines(strip_ansi(raw));
+    std::string line;
+    bool matching_output = false;
+
+    while (std::getline(lines, line)) {
+        auto value = trim(line);
+        if (value.rfind("Output:", 0) == 0) {
+            std::istringstream header(value);
+            std::string label, id, name;
+            header >> label >> id >> name;
+            matching_output = (name == output);
+            continue;
+        }
+        if (!matching_output || value.rfind("Vrr:", 0) != 0) continue;
+
+        value = trim(value.substr(4));
+        std::transform(value.begin(), value.end(), value.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+        if (value == "never") return VrrPolicy::never;
+        if (value == "always") return VrrPolicy::always;
+        if (value == "automatic") return VrrPolicy::automatic;
+        return VrrPolicy::unknown;
+    }
+    return VrrPolicy::unknown;
+}
+
+static VrrPolicy vrr_current_policy(const std::string &output) {
+    return parse_vrr_policy(exec_capture_argv("kscreen-doctor", {"-o"}), output);
+}
+
+static const char *vrr_policy_name(VrrPolicy policy) {
+    switch (policy) {
+        case VrrPolicy::never: return "never";
+        case VrrPolicy::always: return "always";
+        case VrrPolicy::automatic: return "automatic";
+        default: return "unknown";
+    }
+}
+
+static VrrPolicy saved_vrr_policy() {
+    auto policy = read_file_trim(state_dir + "/monitor/vrr_policy");
+    std::transform(policy.begin(), policy.end(), policy.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+    if (policy == "never") return VrrPolicy::never;
+    if (policy == "always") return VrrPolicy::always;
+    if (policy == "automatic") return VrrPolicy::automatic;
+    return VrrPolicy::unknown;
+}
+
+static bool set_vrr_policy(VrrPolicy wanted) {
+    if (wanted == VrrPolicy::unknown) return false;
+    if (vrr_current_policy(g_config.hdr_output) == wanted) return true;
+
+    const auto policy = vrr_policy_name(wanted);
+    if (!exec_argv("kscreen-doctor",
+                   {"output." + g_config.hdr_output + ".vrrpolicy." + policy})) {
+        std::cerr << "game-session: failed to set VRR " << policy << " on "
+                  << g_config.hdr_output << "\n";
+        return false;
+    }
+
+    for (int attempt = 0; attempt < 30; ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (vrr_current_policy(g_config.hdr_output) == wanted) return true;
+    }
+    std::cerr << "game-session: timed out waiting for VRR " << policy
+              << " on " << g_config.hdr_output << "\n";
+    return false;
+}
+
+static bool save_vrr_policy(const std::string &dir) {
+    if (!g_config.vrr) return true;
+    auto d = dir + "/monitor";
+    mkdir(d.c_str(), 0755);
+    const auto policy = vrr_current_policy(g_config.hdr_output);
+    if (policy == VrrPolicy::unknown) {
+        std::cerr << "game-session: could not read VRR policy for "
+                  << g_config.hdr_output << "; display settings were not changed\n";
+        return false;
+    }
+    return write_file(d + "/vrr_policy", vrr_policy_name(policy));
+}
+
 // ── monitor DDC/CI ────────────────────────────────────────────────────────
 
 static bool save_monitor_state(const std::string &dir) {
@@ -728,6 +819,7 @@ static bool apply_display_settings() {
 
     if (has_monitor_state && !set_hdr_state(HdrState::disabled)) return false;
     if (!apply_monitor()) return false;
+    if (g_config.vrr && !set_vrr_policy(VrrPolicy::automatic)) return false;
 
     const auto game_hdr = g_config.hdr ? HdrState::enabled : original_hdr;
     return game_hdr == HdrState::unknown || set_hdr_state(game_hdr);
@@ -794,6 +886,7 @@ static void fan_loop(std::atomic<bool> &running, const Config &cfg) {
 
 static bool cleanup() {
     const auto original_hdr = saved_hdr_state();
+    const auto original_vrr = saved_vrr_policy();
     const bool has_monitor_state =
         !read_file_trim(state_dir + "/monitor/bus").empty();
 
@@ -808,8 +901,10 @@ static bool cleanup() {
     const bool monitor_restored = hdr_disabled && restore_monitor();
     const bool hdr_restored = original_hdr == HdrState::unknown ||
         set_hdr_state(original_hdr);
+    const bool vrr_restored = original_vrr == VrrPolicy::unknown ||
+        set_vrr_policy(original_vrr);
 
-    const bool display_restored = monitor_restored && hdr_restored;
+    const bool display_restored = monitor_restored && hdr_restored && vrr_restored;
     if (display_restored && !state_dir.empty()) {
         std::error_code ec;
         fs::remove_all(state_dir, ec);
@@ -912,6 +1007,7 @@ static void cmd_dump() {
     std::cout << "  voltage_offset   = " << (g_config.voltage_offset.empty() ? "(not set)" : g_config.voltage_offset) << "\n";
     std::cout << "  monitor_preset   = " << (g_config.monitor_preset.empty() ? "(not set)" : g_config.monitor_preset) << "\n";
     std::cout << "  hdr              = " << (g_config.hdr ? "true" : "false") << "\n";
+    std::cout << "  vrr              = " << (g_config.vrr ? "true" : "false") << "\n";
     std::cout << "  hdr_output       = " << g_config.hdr_output << "\n";
     std::cout << "  fan_enabled      = " << (g_config.fan_enabled ? "true" : "false") << "\n";
     std::cout << "  fan_curve        = ";
@@ -955,7 +1051,7 @@ int main(int argc, char *argv[]) {
     signal(SIGTERM, handle_signal);
     signal(SIGQUIT, handle_signal);
 
-    if (!save_hdr_state(state_dir)) {
+    if (!save_hdr_state(state_dir) || !save_vrr_policy(state_dir)) {
         std::error_code ec;
         fs::remove_all(state_dir, ec);
         return 1;
